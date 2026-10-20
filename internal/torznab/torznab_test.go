@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/easly1989/animeworldtv-indexer/internal/downloader"
 	"github.com/easly1989/animeworldtv-indexer/internal/indexer"
 )
 
@@ -30,13 +31,6 @@ func (f *fakeBackend) Search(_ context.Context, q string, offset, limit int) ([]
 		{Title: "Frieren - 01 [ITA]", Token: "NFYNE-", SeriesPath: "/play/frieren-ita.v26Gn", Dub: true,
 			Size: 300 << 20, Estimated: true, Published: time.Date(2024, 4, 1, 0, 0, 0, 0, time.UTC)},
 	}, nil
-}
-
-func (f *fakeBackend) FileURL(_ context.Context, token string) (string, error) {
-	if token == "boom" {
-		return "", errors.New("upstream down")
-	}
-	return "https://files.example/" + token + ".mp4", nil
 }
 
 func newHandler(b *fakeBackend) http.Handler {
@@ -153,7 +147,7 @@ func TestSearchFeed(t *testing.T) {
 	if it.Title != "Frieren & Co - 01 [SUB ITA]" || it.Size != 502785614 || it.Enclosure.Length != 502785614 {
 		t.Errorf("item wrong: %+v", it)
 	}
-	if want := "http://indexer:9698/download?ep=vlhlNp"; it.Link != want || it.Enclosure.URL != want {
+	if want := "http://indexer:9698/download?ep=vlhlNp&n=Frieren+%26+Co+-+01+%5BSUB+ITA%5D"; it.Link != want || it.Enclosure.URL != want {
 		t.Errorf("link %q enclosure %q, want %q", it.Link, it.Enclosure.URL, want)
 	}
 	if it.Comments != "https://www.animeworld.ac/play/sousou-no-frieren.kbcPv" || it.GUID == "" {
@@ -215,16 +209,18 @@ func TestUnknownFunction(t *testing.T) {
 
 func TestDownload(t *testing.T) {
 	h := newHandler(&fakeBackend{})
-	rec := get(h, "/download?ep=vlhlNp")
-	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "https://files.example/vlhlNp.mp4" {
-		t.Errorf("code=%d location=%q", rec.Code, rec.Header().Get("Location"))
+	rec := get(h, "/download?ep=vlhlNp&n=Frieren+-+01+%5BSUB+ITA%5D")
+	loc := rec.Header().Get("Location")
+	if rec.Code != http.StatusFound || !strings.HasPrefix(loc, "magnet:?xt=urn:btih:") {
+		t.Fatalf("code=%d location=%q", rec.Code, loc)
+	}
+	token, name, err := downloader.ParseMagnet(loc)
+	if err != nil || token != "vlhlNp" || name != "Frieren - 01 [SUB ITA]" {
+		t.Errorf("magnet %q parsed to token=%q name=%q err=%v", loc, token, name, err)
 	}
 	for _, bad := range []string{"/download", "/download?ep=a/b", "/download?ep=a%26b"} {
 		if rec := get(h, bad); rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: code=%d, want 400", bad, rec.Code)
 		}
-	}
-	if rec := get(h, "/download?ep=boom"); rec.Code != http.StatusBadGateway {
-		t.Errorf("upstream failure: code=%d", rec.Code)
 	}
 }

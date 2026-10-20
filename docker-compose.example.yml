@@ -1,12 +1,17 @@
 # Example: add this service to the existing "arr" stack next to Prowlarr (9696)
-# and mircrewrr (9697). Prowlarr then reaches it at http://animeworld-indexer:9698.
+# and mircrewrr (9697). Prowlarr then reaches it at http://animeworld-indexer:9698,
+# and Sonarr/Radarr use the same address as a qBittorrent download client.
 services:
   animeworld-indexer:
     image: ghcr.io/easly1989/animeworldtv-indexer:latest
     container_name: animeworld-indexer
     restart: unless-stopped
+    # Same owner as the media library, so imported files get the right uid/gid.
+    user: "1000:1000"
     env_file: .env
     ports:
       - "9698:9698"
     volumes:
       - ./animeworld-indexer/data:/app/data
+      # Must be the same path Sonarr/Radarr see (or add a Remote Path Mapping).
+      - /volume1/media/downloads:/downloads

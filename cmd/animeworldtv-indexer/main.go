@@ -18,7 +18,9 @@ import (
 
 	"github.com/easly1989/animeworldtv-indexer/internal/animeworld"
 	"github.com/easly1989/animeworldtv-indexer/internal/config"
+	"github.com/easly1989/animeworldtv-indexer/internal/downloader"
 	"github.com/easly1989/animeworldtv-indexer/internal/indexer"
+	"github.com/easly1989/animeworldtv-indexer/internal/qbit"
 	"github.com/easly1989/animeworldtv-indexer/internal/store"
 	"github.com/easly1989/animeworldtv-indexer/internal/torznab"
 )
@@ -52,7 +54,11 @@ func run() error {
 		MaxSeries: cfg.MaxSeries, Concurrency: cfg.Concurrency, Budget: cfg.SearchBudget,
 	})
 
+	dl := downloader.New(svc, cfg.DownloadDir, nil)
+	defer dl.Close()
+
 	mux := http.NewServeMux()
+	mux.Handle("/api/v2/", qbit.New(qbit.Options{APIKey: cfg.APIKey}, dl))
 	mux.Handle("/", torznab.New(torznab.Options{APIKey: cfg.APIKey, SiteURL: cfg.BaseURL}, svc))
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

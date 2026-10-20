@@ -11,7 +11,8 @@ func TestDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.Port != 9698 || c.Host != "0.0.0.0" || c.DataDir != "/app/data" || c.BaseURL != "https://www.animeworld.ac" ||
-		c.LogLevel != "INFO" || c.MaxSeries != 8 || c.Concurrency != 4 || c.SearchBudget != 40*time.Second {
+		c.LogLevel != "INFO" || c.MaxSeries != 8 || c.Concurrency != 4 || c.SearchBudget != 40*time.Second ||
+		c.DownloadDir != "/downloads" {
 		t.Errorf("unexpected defaults: %+v", c)
 	}
 }
