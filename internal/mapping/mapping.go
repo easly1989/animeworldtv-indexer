@@ -93,11 +93,26 @@ func firstInt(raw json.RawMessage) int {
 type Index struct {
 	byMAL, byAniList map[int]Entry
 	byTVDB           map[int][]Entry
+	byIMDB           map[string][]Entry // films only
+	byTMDB           map[int][]Entry    // films only
 }
 
+// IsMovie reports whether the entry is a film: the list types it MOVIE or ties it to a TMDB movie.
+func (e Entry) IsMovie() bool { return e.Type == "MOVIE" || e.TMDBKind == "movie" }
+
 func NewIndex(entries []Entry) *Index {
-	idx := &Index{byMAL: map[int]Entry{}, byAniList: map[int]Entry{}, byTVDB: map[int][]Entry{}}
+	idx := &Index{byMAL: map[int]Entry{}, byAniList: map[int]Entry{}, byTVDB: map[int][]Entry{},
+		byIMDB: map[string][]Entry{}, byTMDB: map[int][]Entry{}}
 	for _, e := range entries {
+		if e.IsMovie() {
+			if e.IMDB != "" {
+				idx.byIMDB[e.IMDB] = append(idx.byIMDB[e.IMDB], e)
+			}
+			// A TMDB id is only unique per kind: tv 1 and movie 1 are different titles.
+			if e.TMDB != 0 && e.TMDBKind == "movie" {
+				idx.byTMDB[e.TMDB] = append(idx.byTMDB[e.TMDB], e)
+			}
+		}
 		if e.MAL != 0 {
 			idx.byMAL[e.MAL] = e
 		}
@@ -141,6 +156,22 @@ func (i *Index) ByTVDB(id int) []Entry {
 		return nil
 	}
 	return i.byTVDB[id]
+}
+
+// ByIMDB returns the films with the given IMDb id ("tt5311514").
+func (i *Index) ByIMDB(id string) []Entry {
+	if i == nil {
+		return nil
+	}
+	return i.byIMDB[id]
+}
+
+// ByTMDB returns the films with the given TMDB movie id.
+func (i *Index) ByTMDB(id int) []Entry {
+	if i == nil {
+		return nil
+	}
+	return i.byTMDB[id]
 }
 
 // Numbering says how an AnimeWorld series maps onto TVDB: the episode it calls
