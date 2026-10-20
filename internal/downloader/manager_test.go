@@ -124,8 +124,9 @@ func TestStalledDownloadFails(t *testing.T) {
 	if !strings.Contains(j.Err, "stalled") {
 		t.Errorf("error %q", j.Err)
 	}
-	if left, _ := filepath.Glob(filepath.Join(j.SavePath, "*")); len(left) != 0 {
-		t.Errorf("partial file left: %v", left)
+	// The partial file stays for Resume, but never under the final name.
+	if left, _ := filepath.Glob(filepath.Join(j.SavePath, "*.mp4")); len(left) != 0 {
+		t.Errorf("unfinished file published: %v", left)
 	}
 }
 

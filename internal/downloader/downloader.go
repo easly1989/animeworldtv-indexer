@@ -193,7 +193,7 @@ func (m *Manager) restore() {
 		slog.Warn("restore downloads failed", "err", err)
 		return
 	}
-	keep := map[string]bool{}
+	keep := map[string]bool{} // partial file names: DOWNLOAD_DIR may be spelled differently now
 	var resume []*entry
 	for _, raw := range rows {
 		e := &entry{}
@@ -202,26 +202,31 @@ func (m *Manager) restore() {
 			continue
 		}
 		e.Speed = 0
-		switch e.State {
-		case Completed:
-			fi, err := os.Stat(e.path())
-			if err != nil { // the client already took or deleted it
-				_ = m.store.DeleteDownload(e.Hash)
-				continue
-			}
-			e.Done, e.Size = fi.Size(), fi.Size()
-		case Failed:
-		default:
-			keep[e.tmp()] = true
-			e.Done = 0
-			if fi, err := os.Stat(e.tmp()); err == nil {
-				e.Done = fi.Size()
-			}
-			if e.State != Paused {
-				resume = append(resume, e)
-			}
-		}
 		m.jobs[e.Hash] = e
+		if e.State == Completed {
+			fi, err := os.Stat(e.path())
+			switch {
+			case err == nil:
+				e.Done, e.Size = fi.Size(), fi.Size()
+			case errors.Is(err, os.ErrNotExist) && exists(e.SavePath): // the client already took or deleted it
+				delete(m.jobs, e.Hash)
+				_ = m.store.DeleteDownload(e.Hash)
+			} // otherwise the folder itself is missing (volume not mounted?): keep the row
+			continue
+		}
+		keep[filepath.Base(e.tmp())] = true
+		e.Done = 0
+		if fi, err := os.Stat(e.tmp()); err == nil {
+			e.Done = fi.Size()
+		} else if fi, err := os.Stat(e.path()); err == nil {
+			// The last run renamed the file but died before recording it.
+			e.State, e.Done, e.Size, e.Finished = Completed, fi.Size(), fi.Size(), time.Now()
+			m.save(e)
+			continue
+		}
+		if e.State != Paused && e.State != Failed {
+			resume = append(resume, e)
+		}
 	}
 	m.sweepOrphans(keep)
 	sort.Slice(resume, func(i, j int) bool { return resume[i].Added.Before(resume[j].Added) })
@@ -245,7 +250,7 @@ func (m *Manager) sweepOrphans(keep map[string]bool) {
 	for _, d := range dirs {
 		ents, _ := os.ReadDir(d)
 		for _, f := range ents {
-			if p := filepath.Join(d, f.Name()); !f.IsDir() && partName.MatchString(f.Name()) && !keep[p] {
+			if p := filepath.Join(d, f.Name()); !f.IsDir() && partName.MatchString(f.Name()) && !keep[f.Name()] {
 				if err := os.Remove(p); err == nil {
 					slog.Info("removed orphan partial file", "path", p)
 				}
@@ -328,6 +333,9 @@ func (m *Manager) AddPaused(token, name, category string, paused bool) (Job, err
 			name += " [" + hash[:8] + "]"
 			break
 		}
+	}
+	if old := m.jobs[hash]; old != nil {
+		_ = os.Remove(old.tmp()) // a failed job's leftovers; the new job starts clean
 	}
 	e := &entry{Job: Job{
 		Hash: hash, Token: token, Name: name, Category: category,
@@ -499,10 +507,7 @@ func (m *Manager) Delete(hash string, files bool) bool {
 // retries and records the outcome.
 func (m *Manager) run(ctx context.Context, e *entry, prev <-chan struct{}, held bool) {
 	if prev != nil {
-		select {
-		case <-prev:
-		case <-ctx.Done():
-		}
+		<-prev // even when cancelled: a later run waits on our done, so two must never write one file
 	}
 	if !held {
 		select {
@@ -535,7 +540,9 @@ func (m *Manager) run(ctx context.Context, e *entry, prev <-chan struct{}, held 
 	}
 	e.Speed = 0
 	if err != nil {
-		_ = os.Remove(e.tmp())
+		if errors.As(err, new(permanent)) { // nothing left to resume; otherwise Resume continues the partial file
+			_ = os.Remove(e.tmp())
+		}
 		e.State, e.Err = Failed, err.Error()
 		m.save(e)
 		slog.Error("download failed", "episode", e.Token, "name", e.Name, "err", err)
@@ -551,13 +558,20 @@ type permanent struct{ error }
 
 func (p permanent) Unwrap() error { return p.error }
 
-// fetchWithRetry makes up to maxAttempts tries with exponential backoff. Each
-// try resolves the file URL again and continues from the partial file.
+// fetchWithRetry makes up to maxAttempts tries in a row without progress, with
+// exponential backoff. Each try resolves the file URL again and continues from
+// the partial file; a try that gets further than any before starts the count over.
 func (m *Manager) fetchWithRetry(ctx context.Context, e *entry) error {
+	best := m.done(e)
 	for attempt := 1; ; attempt++ {
 		err := m.fetch(ctx, e)
-		var perm permanent
-		if err == nil || ctx.Err() != nil || attempt == maxAttempts || errors.As(err, &perm) {
+		if err == nil || ctx.Err() != nil || errors.As(err, new(permanent)) {
+			return err
+		}
+		if d := m.done(e); d > best { // bounded by the file size, so this ends
+			best, attempt = d, 1
+		}
+		if attempt == maxAttempts {
 			return err
 		}
 		wait := m.backoff << (attempt - 1)
@@ -568,6 +582,12 @@ func (m *Manager) fetchWithRetry(ctx context.Context, e *entry) error {
 			return ctx.Err()
 		}
 	}
+}
+
+func (m *Manager) done(e *entry) int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return e.Done
 }
 
 // fetch is one attempt. It continues the partial file with a Range request
@@ -594,6 +614,9 @@ func (m *Manager) fetch(ctx context.Context, e *entry) (err error) {
 	if fi, err := os.Stat(tmp); err == nil {
 		offset = fi.Size()
 	}
+	m.mu.Lock()
+	known := e.Size // what an earlier run was told the file size is; 0 when never told
+	m.mu.Unlock()
 	req, err := http.NewRequestWithContext(attempt, http.MethodGet, u, nil)
 	if err != nil {
 		return err
@@ -612,15 +635,23 @@ func (m *Manager) fetch(ctx context.Context, e *entry) (err error) {
 	case http.StatusOK: // no Range, or the server ignored it: the whole file
 		offset = 0
 	case http.StatusPartialContent:
-		var start int64
-		if _, err := fmt.Sscanf(resp.Header.Get("Content-Range"), "bytes %d-", &start); err != nil || offset == 0 || start != offset {
+		var start, end, total int64
+		n, _ := fmt.Sscanf(resp.Header.Get("Content-Range"), "bytes %d-%d/%d", &start, &end, &total)
+		if n < 1 || offset == 0 || start != offset {
 			_ = os.Remove(tmp)
 			return errors.New("server answered a different range than asked")
+		}
+		if n == 3 && known > 0 && total != known { // the mirror now serves another file
+			_ = os.Remove(tmp)
+			return fmt.Errorf("file changed on the server (%d bytes, was %d), starting over", total, known)
 		}
 		flags = os.O_WRONLY | os.O_APPEND
 	case http.StatusRequestedRangeNotSatisfiable:
 		var total int64
-		if _, err := fmt.Sscanf(resp.Header.Get("Content-Range"), "bytes */%d", &total); err == nil && offset > 0 && total == offset {
+		if _, err := fmt.Sscanf(resp.Header.Get("Content-Range"), "bytes */%d", &total); err != nil {
+			total = known // some CDNs omit the header
+		}
+		if offset > 0 && total == offset {
 			return m.finish(e, offset) // an earlier run died just before the rename
 		}
 		_ = os.Remove(tmp)

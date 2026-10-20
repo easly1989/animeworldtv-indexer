@@ -3,6 +3,7 @@ package downloader
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -27,6 +28,7 @@ type rangeServer struct {
 	ranges      []string // Range header of each request ("" for none)
 	served      int64    // body bytes sent
 	stallAt     int      // first request: send this many bytes, then hang
+	dropAt      int      // every request: send at most this many bytes, then cut the connection
 	ignoreRange bool     // answer 200 with the whole file whatever is asked
 	failN       int      // answer 503 to this many requests first
 	missing     bool     // answer 404
@@ -59,7 +61,7 @@ func (s *rangeServer) handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "busy", http.StatusServiceUnavailable)
 		return
 	}
-	stall, ignore, hold := s.stallAt, s.ignoreRange, s.hold
+	stall, drop, ignore, hold := s.stallAt, s.dropAt, s.ignoreRange, s.hold
 	s.mu.Unlock()
 
 	if hold != nil {
@@ -91,6 +93,11 @@ func (s *rangeServer) handle(w http.ResponseWriter, r *http.Request) {
 		w.(http.Flusher).Flush()
 		<-r.Context().Done()
 		return
+	}
+	if drop > 0 && len(body) > drop {
+		send(body[:drop])
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
 	}
 	send(body)
 }
@@ -429,5 +436,118 @@ func TestSameEpisodeUnderAnotherCategoryIsRefused(t *testing.T) {
 	}
 	if got := m.List(); len(got) != 1 || got[0].Category != "sonarr" {
 		t.Errorf("jobs %+v", got)
+	}
+}
+
+func TestRetriesThatProgressKeepGoing(t *testing.T) {
+	s := newRangeServer(t)
+	s.dropAt = 20000 // every connection breaks after 20 kB of the 64 KiB
+	m, _ := persistent(t, s, t.TempDir(), filepath.Join(t.TempDir(), "q.db"))
+	m.Add("aaa", "Show - 01", "c")
+	j := waitFor(t, m, "aaa", Completed)
+	if b, err := os.ReadFile(j.Path()); err != nil || !bytes.Equal(b, s.data) {
+		t.Errorf("file differs from the source: %v", err)
+	}
+	if n := len(s.requests()); n != 4 {
+		t.Errorf("%d requests, want 4 ranged pieces", n)
+	}
+}
+
+func TestFailedJobKeepsPartialForResume(t *testing.T) {
+	s := newRangeServer(t)
+	s.stallAt = 20000
+	m, _ := persistent(t, s, t.TempDir(), filepath.Join(t.TempDir(), "q.db"))
+	m.idle = 50 * time.Millisecond
+	j, _ := m.Add("aaa", "Show - 01", "c")
+	waitDone(t, m, "aaa", 20000)
+	s.mu.Lock()
+	s.failN = 100 // after the stall, nothing but 503s
+	s.mu.Unlock()
+	waitFor(t, m, "aaa", Failed)
+	if fi, err := os.Stat((&entry{Job: j}).tmp()); err != nil || fi.Size() != 20000 {
+		t.Fatalf("partial file not kept after failure: %v", err)
+	}
+	s.mu.Lock()
+	s.failN = 0
+	s.mu.Unlock()
+	m.Resume(j.Hash)
+	done := waitFor(t, m, "aaa", Completed)
+	if r := s.requests(); r[len(r)-1] != "bytes=20000-" {
+		t.Errorf("resume asked %q, want a Range from 20000", r[len(r)-1])
+	}
+	if b, err := os.ReadFile(done.Path()); err != nil || !bytes.Equal(b, s.data) {
+		t.Errorf("file differs from the source: %v", err)
+	}
+}
+
+func TestChangedFileOnServerStartsOver(t *testing.T) {
+	s := newRangeServer(t)
+	dir, db := t.TempDir(), filepath.Join(t.TempDir(), "q.db")
+	_, _ = interrupted(t, s, dir, db)
+	s.data = bytes.Repeat([]byte("fedcba9876543210"), 5<<10+256) // another, larger file
+
+	m, _ := persistent(t, s, dir, db)
+	j := waitFor(t, m, "aaa", Completed)
+	if b, err := os.ReadFile(j.Path()); err != nil || !bytes.Equal(b, s.data) {
+		t.Errorf("file is a mix of the old and the new source: %v", err)
+	}
+}
+
+func TestRestartWithDirSpelledDifferentlyKeepsPartial(t *testing.T) {
+	s := newRangeServer(t)
+	dir, db := t.TempDir(), filepath.Join(t.TempDir(), "q.db")
+	_, size := interrupted(t, s, dir, db)
+	served := s.bytesServed()
+
+	t.Chdir(dir)
+	m, _ := persistent(t, s, ".", db) // same folder, relative this time
+	waitFor(t, m, "aaa", Completed)
+	if again := s.bytesServed() - served; again != int64(len(s.data))-size {
+		t.Errorf("second run received %d bytes, want only the missing %d", again, int64(len(s.data))-size)
+	}
+}
+
+func TestRestartAfterRenameButBeforeSaveIsComplete(t *testing.T) {
+	s := newRangeServer(t)
+	dir, db := t.TempDir(), filepath.Join(t.TempDir(), "q.db")
+	m, st := persistent(t, s, dir, db)
+	m.Add("aaa", "Show - 01", "c")
+	j := waitFor(t, m, "aaa", Completed)
+	m.Close()
+	j.State = Downloading // as if the process died right after the rename
+	raw, _ := json.Marshal(j)
+	if err := st.PutDownload(j.Hash, raw); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	m2, _ := persistent(t, s, dir, db)
+	if got, _ := m2.Get(j.Hash); got.State != Completed || got.Done != int64(len(s.data)) {
+		t.Errorf("restored %+v, want completed", got)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := len(s.requests()); n != 1 {
+		t.Errorf("%d requests, want no new download", n)
+	}
+}
+
+func TestRestoreKeepsCompletedWhenFolderIsMissing(t *testing.T) {
+	s := newRangeServer(t)
+	dir, db := t.TempDir(), filepath.Join(t.TempDir(), "q.db")
+	m, st := persistent(t, s, dir, db)
+	m.Add("aaa", "Show - 01", "c")
+	j := waitFor(t, m, "aaa", Completed)
+	m.Close()
+	st.Close()
+	if err := os.Rename(filepath.Join(dir, "c"), filepath.Join(dir, "away")); err != nil { // volume not mounted
+		t.Fatal(err)
+	}
+
+	m2, st2 := persistent(t, s, dir, db)
+	if _, ok := m2.Get(j.Hash); !ok {
+		t.Error("completed job dropped while its folder is missing")
+	}
+	if rows, _ := st2.Downloads(); len(rows) != 1 {
+		t.Errorf("%d rows, want 1", len(rows))
 	}
 }
