@@ -191,12 +191,12 @@ func newRelease(nb numbered, e animeworld.Episode, season, ep int) (Release, boo
 // latest answers an RSS sync: the episodes in the site's /updated listing
 // (cached for latestTTL), numbered like a TV search, newest first. The listing
 // names the episode, so only the window's series pages are read, for their
-// external ids and from a long-lived cache, and sizes come from the usual
-// cached lookups. A call starts at most 2*MaxSeries uncached series pages and
-// as many size lookups, newest first, so a cold cache warms over a few calls
+// external ids and from a long-lived cache. A call fetches at most MaxSeries
+// uncached series pages, newest first, so a cold cache warms over a few calls
 // instead of hammering the site. An episode whose series page is missing is
 // left out until a later call: guessing its numbering could grab the wrong
-// episode.
+// episode. Sizes never trigger a lookup (that is two requests per episode): a
+// size already measured by a search is used, the rest are estimated.
 func (s *Service) latest(ctx context.Context, season, ep, offset, limit int) ([]Release, error) {
 	ups, err := s.updates(ctx)
 	if err != nil {
@@ -216,7 +216,7 @@ func (s *Service) latest(ctx context.Context, season, ep, offset, limit int) ([]
 	}
 	idx := s.mapIndex(ctx)
 	byPath := map[string]numbered{}
-	for _, se := range s.seriesAllTTL(ctx, hits, idsTTL, 2*s.opt.MaxSeries) {
+	for _, se := range s.seriesAllTTL(ctx, hits, idsTTL, s.opt.MaxSeries) {
 		byPath[se.Path] = numbered{se, idx.Resolve(se.MALID, se.AniListID, se.Title, se.Path)}
 	}
 
@@ -227,13 +227,17 @@ func (s *Service) latest(ctx context.Context, season, ep, offset, limit int) ([]
 			continue
 		}
 		if r, ok := newRelease(nb, animeworld.Episode{Num: u.Num, Token: u.Token}, season, ep); ok {
-			r.Published = s.firstSeen(u.Token) // until the file's own date is known
+			r.Published = s.firstSeen(u.Token) // unless a measured file date is cached
+			var m animeworld.FileMeta
+			if s.cache.Get("meta:"+u.Token, metaTTL, &m) {
+				r.setMeta(m)
+			}
 			rels = append(rels, r)
 		}
 	}
-	err = s.fillSizesN(ctx, rels, 2*s.opt.MaxSeries)
+	estimate(rels)
 	sort.SliceStable(rels, func(i, j int) bool { return rels[i].Published.After(rels[j].Published) })
-	return rels, err
+	return rels, nil
 }
 
 func (s *Service) updates(ctx context.Context) ([]animeworld.Update, error) {
@@ -483,24 +487,13 @@ func (s *Service) seriesAllTTL(ctx context.Context, hits []animeworld.Hit, ttl t
 // fails) gets an estimate, while the fetches keep going in the background so
 // the next search finds them cached.
 func (s *Service) fillSizes(ctx context.Context, rels []Release) error {
-	return s.fillSizesN(ctx, rels, 0)
-}
-
-// fillSizesN is fillSizes starting at most maxFetch lookups (0: no limit),
-// in release order; the others are estimated and measured by a later call.
-func (s *Service) fillSizesN(ctx context.Context, rels []Release, maxFetch int) error {
 	calls := make([]*call, len(rels))
-	fetching := 0
 	for i, r := range rels {
 		var m animeworld.FileMeta
 		if s.cache.Get("meta:"+r.Token, metaTTL, &m) {
 			rels[i].setMeta(m)
 			continue
 		}
-		if maxFetch > 0 && fetching == maxFetch {
-			continue
-		}
-		fetching++
 		calls[i] = s.fetchMeta(ctx, r.Token)
 	}
 

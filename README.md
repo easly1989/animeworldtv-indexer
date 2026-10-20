@@ -56,8 +56,8 @@ AnimeWorld lists every season as its own series, numbered from episode 1 ("Frier
 Sonarr's RSS sync (every ~15 minutes) and Prowlarr's RSS call the indexer with no `q`. The answer is the site's `/updated` listing, one item per listed episode (a sub and a dub of the same episode are two items), newest first, titled and numbered like a TV search (`Title S02E03 [SUB ITA]`, plus `tvdbid`/`season`/`episode` attributes). `season` and `ep`, if sent, filter that list.
 
 - The listing is cached for 5 minutes. It names the episode, so the series' other episodes are not read; the series page is only fetched for its MAL/AniList ids and cached for 24 hours.
-- `pubDate` is the `Last-Modified` of the episode's MP4, the size its `Content-Length`. Until those are measured the size is an estimate and `pubDate` is when the indexer first listed the episode, never the request time.
-- A call starts at most `2 × MAX_SERIES` series pages and as many file lookups, newest first (and only for the requested `limit`/`offset` window). On a cold cache the feed is incomplete for a call or two and fills up as the lookups finish; an episode whose series page is not available yet is left out rather than numbered by guess. Warm calls only look up episodes that are new.
+- RSS never looks up files (that is two requests per episode). If a search has already measured an episode's MP4, its `Last-Modified` is the `pubDate` and its `Content-Length` the size; otherwise the size is an estimate (median of the measured ones, else 300 MiB) and `pubDate` is when the indexer first listed the episode, never the request time.
+- A call fetches at most `MAX_SERIES` uncached series pages, newest first (and only for the requested `limit`/`offset` window). On a cold cache the feed is incomplete for a few calls and fills up; an episode whose series page is not available yet is left out rather than numbered by guess. Warm calls make no request to the site beyond the listing, once per 5 minutes.
 
 ### Configuration
 

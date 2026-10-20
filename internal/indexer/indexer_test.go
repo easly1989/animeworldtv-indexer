@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,8 +22,7 @@ type fakeSite struct {
 	// Optional overrides; the defaults serve one show with a sub and a dub entry.
 	searchErrFor string // a query the site fails on
 	searchFn     func(q string) []animeworld.Hit
-	updates      []animeworld.Update  // what /updated lists
-	modified     map[string]time.Time // file date per episode token; default fixed
+	updates      []animeworld.Update // what /updated lists
 	seriesFn     func(path string) animeworld.Series
 }
 
@@ -77,7 +75,7 @@ func (f *fakeSite) FileURL(_ context.Context, token string) (string, error) {
 	return "http://files/" + token, nil
 }
 
-func (f *fakeSite) FileMeta(ctx context.Context, fileURL string) (animeworld.FileMeta, error) {
+func (f *fakeSite) FileMeta(ctx context.Context, _ string) (animeworld.FileMeta, error) {
 	f.hit("meta")
 	select {
 	case <-time.After(f.metaDelay):
@@ -86,11 +84,7 @@ func (f *fakeSite) FileMeta(ctx context.Context, fileURL string) (animeworld.Fil
 	if f.metaFail {
 		return animeworld.FileMeta{}, errors.New("boom")
 	}
-	mod := time.Date(2024, 3, 31, 0, 0, 0, 0, time.UTC)
-	if m, ok := f.modified[strings.TrimPrefix(fileURL, "http://files/")]; ok {
-		mod = m
-	}
-	return animeworld.FileMeta{Size: 500 << 20, Modified: mod}, nil
+	return animeworld.FileMeta{Size: 500 << 20, Modified: time.Date(2024, 3, 31, 0, 0, 0, 0, time.UTC)}, nil
 }
 
 func newService(t *testing.T, site Site, budget time.Duration) *Service {
