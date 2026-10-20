@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/easly1989/animeworldtv-indexer/internal/solver"
@@ -29,7 +30,12 @@ type Client struct {
 	http       *http.Client
 	retryDelay time.Duration
 	solver     *solver.Solver // nil: challenges are not worked around
+	failing    atomic.Bool    // the last request to the site failed (transport error, 5xx or challenge)
 }
+
+// Reachable reports whether the last request to the site went through. It is
+// true before any request, and ignores requests cancelled by the caller.
+func (c *Client) Reachable() bool { return !c.failing.Load() }
 
 // UseSolver makes the client answer Cloudflare challenges on the site through s.
 func (c *Client) UseSolver(s *solver.Solver) { c.solver = s }
@@ -149,14 +155,24 @@ func (c *Client) once(ctx context.Context, method, rawURL string, handle func(*h
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
+		if onSite && ctx.Err() == nil {
+			c.failing.Store(true)
+		}
 		return true, gen, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		if onSite && isChallenge(resp) {
+			c.failing.Store(true)
 			return false, gen, fmt.Errorf("%s %s: %s: %w", method, rawURL, resp.Status, errChallenge)
 		}
+		if onSite {
+			c.failing.Store(resp.StatusCode >= 500)
+		}
 		return resp.StatusCode >= 500, gen, fmt.Errorf("%s %s: %s", method, rawURL, resp.Status)
+	}
+	if onSite {
+		c.failing.Store(false)
 	}
 	return false, gen, handle(resp)
 }
