@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -26,9 +27,17 @@ type Config struct {
 	// <DownloadDir>/<category>/. Sonarr/Radarr must see the same path.
 	DownloadDir string
 
+	// MaxDownloads is how many episodes the qBittorrent client downloads at
+	// once; the rest wait as queuedDL.
+	MaxDownloads int
+
 	MaxSeries    int           // series expanded per search
 	Concurrency  int           // simultaneous requests to AnimeWorld
 	SearchBudget time.Duration // how long a search waits for file sizes
+	SizeLookups  int           // uncached file sizes resolved per response; the rest are estimated
+
+	OriginRPS   float64 // requests per second to AnimeWorld itself (not its file servers)
+	OriginBurst int     // how many may go out back to back
 
 	MappingURL     string        // Fribb anime-list-full.json
 	MappingRefresh time.Duration // how often the mapping list is downloaded again
@@ -60,6 +69,12 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		return d
 	}
+	rpsText := str("ORIGIN_RPS", "1")
+	rps, err := strconv.ParseFloat(rpsText, 64)
+	if err != nil || !(rps > 0) || math.IsInf(rps, 0) {
+		errs = append(errs, fmt.Sprintf("ORIGIN_RPS=%q must be a number > 0", rpsText))
+		rps = 1
+	}
 	d := duration("SEARCH_BUDGET", "40s")
 	refresh := duration("MAPPING_REFRESH", "24h")
 
@@ -72,9 +87,13 @@ func Load(getenv func(string) string) (Config, error) {
 		LogLevel:        strings.ToUpper(str("LOG_LEVEL", "INFO")),
 		FlareSolverrURL: str("FLARESOLVERR_URL", "http://byparr:8191"),
 		DownloadDir:     str("DOWNLOAD_DIR", "/downloads"),
+		MaxDownloads:    num("MAX_DOWNLOADS", 2, 1),
 		MaxSeries:       num("MAX_SERIES", 8, 1),
 		Concurrency:     num("CONCURRENCY", 4, 1),
 		SearchBudget:    d,
+		SizeLookups:     num("SIZE_LOOKUPS", 10, 0),
+		OriginRPS:       rps,
+		OriginBurst:     num("ORIGIN_BURST", 3, 1),
 		MappingURL:      str("MAPPING_URL", "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-full.json"),
 		MappingRefresh:  refresh,
 	}

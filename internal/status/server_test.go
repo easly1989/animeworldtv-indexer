@@ -86,6 +86,8 @@ func TestStatusPayload(t *testing.T) {
 		{Hash: "a", Name: "Frieren S01E03 [SUB ITA]", Category: "tv-sonarr", State: downloader.Downloading, Size: 400, Done: 100, Speed: 50, Added: added},
 		{Hash: "c", Name: "Broken", State: downloader.Failed, Err: "boom", Added: added.Add(2 * time.Minute)},
 		{Hash: "d", Name: "Future", State: downloader.State(99), Added: added.Add(3 * time.Minute)},
+		{Hash: "e", Name: "Held", State: downloader.Paused, Speed: 0, Added: added.Add(4 * time.Minute)},
+		{Hash: "f", Name: "Waiting", State: downloader.Queued, Added: added.Add(5 * time.Minute)},
 	}
 	_, hub, srv := fixture(t, Options{
 		Version: "1.2.0", SiteURL: "https://www.animeworld.ac",
@@ -114,7 +116,7 @@ func TestStatusPayload(t *testing.T) {
 	if !p.Solver.Configured || p.Solver.URL != "http://byparr:8191" || !p.Solver.CookiesValid || p.Solver.ExpiresAt == nil || !p.Solver.ExpiresAt.Equal(exp) {
 		t.Errorf("solver: %+v", p.Solver)
 	}
-	if len(p.Queue) != 4 || p.Queue[0].Hash != "a" { // oldest first
+	if len(p.Queue) != 6 || p.Queue[0].Hash != "a" { // oldest first
 		t.Fatalf("queue: %+v", p.Queue)
 	}
 	q := p.Queue[0]
@@ -122,7 +124,8 @@ func TestStatusPayload(t *testing.T) {
 		q.AddedAt != "2026-10-20T21:30:00Z" || q.Name != "Frieren S01E03 [SUB ITA]" || q.Category != "tv-sonarr" {
 		t.Errorf("downloading item: %+v", q)
 	}
-	if p.Queue[1].State != "completed" || p.Queue[1].Progress != 1 || p.Queue[2].State != "error" || p.Queue[3].State != "queued" {
+	if p.Queue[1].State != "completed" || p.Queue[1].Progress != 1 || p.Queue[2].State != "error" || p.Queue[3].State != "queued" ||
+		p.Queue[4].State != "paused" || p.Queue[5].State != "queued" {
 		t.Errorf("states: %+v", p.Queue)
 	}
 	if len(p.Errors) != 1 || p.Errors[0].Message != "file size lookup failed err=x" || len(p.Errors[0].Timestamp) != len(timeLayout) {
@@ -145,6 +148,34 @@ func TestStatusEmptyAndDegraded(t *testing.T) {
 	}
 	if !strings.Contains(string(raw["solver"]), `"configured":false`) || !strings.Contains(string(raw["solver"]), `"expires_at":null`) {
 		t.Errorf("solver = %s", raw["solver"])
+	}
+}
+
+// An origin ban shows as degraded with a reason, on the keyed status API and on
+// the open /health probe (which stays 200 so the container is not restarted).
+func TestBlockedIsDegradedWithReason(t *testing.T) {
+	reason := "AnimeWorld refused this IP (HTTP 403)"
+	_, _, srv := fixture(t, Options{Reachable: func() bool { return false }, Reason: func() string { return reason }})
+	for _, path := range []string{"/api/status", "/health"} {
+		resp := get(t, srv.URL+path, key)
+		var p struct{ Status, Reason string }
+		if err := json.NewDecoder(resp.Body).Decode(&p); err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 200 || p.Status != "degraded" || p.Reason != reason {
+			t.Errorf("%s: code=%d %+v", path, resp.StatusCode, p)
+		}
+	}
+
+	_, _, ok := fixture(t, Options{Reason: func() string { return "" }})
+	for _, path := range []string{"/api/status", "/health"} {
+		var raw map[string]json.RawMessage
+		if err := json.NewDecoder(get(t, ok.URL+path, key).Body).Decode(&raw); err != nil {
+			t.Fatal(err)
+		}
+		if string(raw["status"]) != `"ok"` || raw["reason"] != nil {
+			t.Errorf("%s healthy: status=%s reason=%s", path, raw["status"], raw["reason"])
+		}
 	}
 }
 

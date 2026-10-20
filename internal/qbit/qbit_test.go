@@ -295,3 +295,58 @@ func TestFailedDownloadShowsAsError(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// A client set to add stopped (Sonarr/Radarr "paused"/"stopped") must not start
+// the download; resume/start (the old and new names) begin it.
+func TestAddPausedThenResumeAndStart(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	hash := downloader.Hash("vlhlNp")
+	for flag, call := range map[string]string{"paused": "resume", "stopped": "start"} {
+		h.do("POST", "/api/v2/torrents/delete", url.Values{"hashes": {hash}, "deleteFiles": {"true"}})
+		if _, body := h.do("POST", "/api/v2/torrents/add", url.Values{"urls": {downloader.Magnet("vlhlNp", "Show - 01")}, "category": {"c"}, flag: {"true"}}); body != "Ok." {
+			t.Fatalf("add: %q", body)
+		}
+		time.Sleep(50 * time.Millisecond)
+		if got := h.info(""); len(got) != 1 || got[0].State != "pausedDL" {
+			t.Fatalf("%s: want one pausedDL torrent, got %+v", flag, got)
+		}
+		h.do("POST", "/api/v2/torrents/"+call, url.Values{"hashes": {hash}})
+		deadline := time.Now().Add(5 * time.Second)
+		for h.info("")[0].State != "pausedUP" {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: never completed: %+v", call, h.info(""))
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestPauseAndStopAreAccepted(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	hash := downloader.Hash("vlhlNp")
+	h.do("POST", "/api/v2/torrents/add", url.Values{"urls": {downloader.Magnet("vlhlNp", "Show - 01")}, "category": {"c"}, "paused": {"true"}})
+	for _, p := range []string{"pause", "stop"} {
+		if code, body := h.do("POST", "/api/v2/torrents/"+p, url.Values{"hashes": {hash}}); code != 200 || body != "Ok." {
+			t.Errorf("%s: %d %q", p, code, body)
+		}
+	}
+	if got := h.info(""); len(got) != 1 || got[0].State != "pausedDL" {
+		t.Errorf("got %+v", got)
+	}
+}
+
+// Sonarr and Radarr share one episode hash; the second client is refused rather
+// than silently handed the first one's job.
+func TestSameEpisodeInAnotherCategoryFails(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	magnet := downloader.Magnet("vlhlNp", "Show - 01")
+	if _, body := h.do("POST", "/api/v2/torrents/add", url.Values{"urls": {magnet}, "category": {"sonarr"}}); body != "Ok." {
+		t.Fatalf("first add: %q", body)
+	}
+	if _, body := h.do("POST", "/api/v2/torrents/add", url.Values{"urls": {magnet}, "category": {"radarr"}}); body != "Fails." {
+		t.Errorf("second category: %q, want Fails.", body)
+	}
+}

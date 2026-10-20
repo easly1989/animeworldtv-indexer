@@ -2,17 +2,17 @@
 
 A [Torznab](https://torznab.github.io/spec-1.3-draft/) indexer for [AnimeWorld](https://www.animeworld.ac), so Prowlarr, Sonarr and Radarr can search it. One Go binary, one container, SQLite cache.
 
-Status: keyword, TVDB-numbered TV search, movie search, RSS (latest episodes), a Cloudflare fallback and grab-to-import through an emulated qBittorrent client work end to end. Planned next: a persistent download queue.
+Status: keyword, TVDB-numbered TV search, movie search, RSS (latest episodes), a Cloudflare fallback and grab-to-import through an emulated qBittorrent client work end to end. The download queue survives restarts.
 
 ## What it does
 
 - `GET /api?t=caps` and `GET /api?t=search&q=<title>` (also `tvsearch`) return one RSS item per episode, category `5070` (TV/Anime). `t=movie` returns films, category `2000` (see [Movies](#movies)).
 - `t=tvsearch` supports `q`, `season`, `ep` and `tvdbid` (see [TVDB numbering](#tvdb-numbering)). `t=search` accepts a trailing `S02E03` in `q` as a season/episode filter; any other `q` (including titles ending in a number) goes to the site as is.
 - Titles look like `Sousou no Frieren S02E03 [SUB ITA]`. Dubbed entries (separate series on the site) get `[ITA]`.
-- Every item has a size and date from a `HEAD` on the episode's direct MP4. Lookups are cached in SQLite and bounded; if a search runs out of time budget, the remaining sizes are estimated from the same series while the real ones finish in the background.
+- Every item has a size and date. Real ones come from a `HEAD` on the episode's direct MP4, but only for the newest `SIZE_LOOKUPS` (10) episodes of a response that are not cached yet; the others are estimated from the same series (else a default), and later searches measure the next ones. Real sizes are cached in SQLite for 30 days; if a search runs out of time budget, the remaining lookups finish in the background.
 - `t=tvsearch` or `t=search` without `q` (and without `tvdbid`) is the RSS feed: the latest episodes, see [RSS](#rss). It is also what Prowlarr's indexer Test uses.
 - `GET /download?ep=<token>&n=<title>` redirects to a magnet (`magnet:?xt=urn:btih:<hash>&dn=<title>&aw=<token>`). The hash is derived from the episode token; `aw` carries the token itself. Sonarr and Radarr pass that magnet to their download client.
-- `/api/v2/...` emulates the **qBittorrent Web API** (the subset Sonarr and Radarr use). Adding the magnet downloads the episode's MP4 over HTTP to `<DOWNLOAD_DIR>/<category>/<title>.mp4` and reports progress and completion like a torrent, so they import the file from the shared volume. The queue is in memory for now: a restart forgets running downloads.
+- `/api/v2/...` emulates the **qBittorrent Web API** (the subset Sonarr and Radarr use). Adding the magnet downloads the episode's MP4 over HTTP to `<DOWNLOAD_DIR>/<category>/<title>.mp4` and reports progress and completion like a torrent, so they import the file from the shared volume. See [Download queue](#download-queue) for parallelism, retries and restarts.
 - `GET /health` returns JSON status, including a `solver` object: `configured`, `url`, `cookies_valid` (valid solved Cloudflare cookies are cached) and `expires_at`. Logs are JSON on stdout.
 - `GET /api/status` and `GET /api/logs` are the operational API the mircrewrr panel reads (see [Status and logs API](#status-and-logs-api)).
 
@@ -34,7 +34,7 @@ Both endpoints need the API key, as an `X-Api-Key` header (preferred) or the `ap
 }
 ```
 
-- `status` is `degraded` when the last request to the site failed (connection error, 5xx or a Cloudflare challenge that could not be solved), `ok` otherwise; `site.reachable` is the same fact.
+- `status` is `degraded` when the last request to the site failed (connection error, 5xx or a Cloudflare challenge that could not be solved) or the site has banned our IP, `ok` otherwise; `site.reachable` is the same fact. While the site refuses us, a `reason` string says why and until when requests are paused (see [Being polite to the site](#being-polite-to-the-site)); it is absent otherwise. `GET /health` (no key needed) carries the same `status` and `reason`, and stays HTTP 200 so the container is not restarted for something a restart cannot fix.
 - `queue[].state` is `queued`, `downloading`, `completed`, `error` or `paused`. Completed items stay listed until Sonarr/Radarr remove them. `eta` is seconds, `0` when unknown; a failed item also carries an `error` text.
 - `errors` holds the last 20 ERROR log entries, newest last.
 
@@ -51,6 +51,16 @@ data: [{"timestamp":"2026-10-20 23:31:02","level":"INFO","logger":"app","message
 AnimeWorld answers plain requests today, but sits behind Cloudflare. When it returns a challenge (403/503 with `cf-mitigated: challenge` or the "Just a moment" page), the indexer asks the FlareSolverr-compatible solver at `FLARESOLVERR_URL` (Byparr, default `http://byparr:8191`) to open the site once, then reuses the returned cookies and user agent for plain requests. They are cached in the SQLite database for 12 hours (surviving restarts) and renewed as soon as a request is challenged again. Only one solve runs at a time; concurrent challenged requests wait for it. A solve can take 40-130 s, so the solver timeout is 120 s and a search that needs one is slow once.
 
 If the solver is unreachable or fails, the error is logged and the Torznab search returns an empty result (not an error); further requests within 30 s fail fast instead of waiting on the solver again.
+
+### Being polite to the site
+
+AnimeWorld bans IPs it finds abusive (a 403 from nginx, behind Cloudflare). A naive indexer is abusive: one keyword search used to ask for the file size of every episode listed, a request to the site per episode (94 for "frieren") on top of the search and series pages, and Sonarr and Prowlarr search often. So the service limits itself:
+
+- **One rate limit for the site.** All requests to AnimeWorld itself (search and `/updated` pages, series pages and their redirect, `/api/episode/info`, from searches, RSS and grabs alike) share a token bucket: `ORIGIN_RPS` per second (default 1) with bursts of `ORIGIN_BURST` (default 3). Callers wait their turn. The MP4 file servers are a different host and are not limited by it.
+- **No per-episode requests in a search.** Real sizes are looked up for at most `SIZE_LOOKUPS` (default 10) uncached episodes per response, newest first and one at a time, and only one such batch runs at a time across searches; everything else gets an estimated size (median of the series, else 300 MiB) and each later search fills in the next ones. Resolving a file for a grab is one request, as before. `SIZE_LOOKUPS=0` never looks sizes up.
+- **An IP ban is recognised, not fought.** A 429 from the site, or a 403 HTML page, that is not a Cloudflare challenge (no `cf-mitigated: challenge` header, no "Just a moment" page) is treated as a ban; so is a solve whose browser gets a 403 or 429. A 403 in JSON or with no body concerns one resource (a removed episode) and pauses nothing. The nginx "403 Forbidden" page embeds Cloudflare's `challenge-platform` script, so that marker alone does not make a challenge; the solver cannot help with a banned IP and is not called. Instead all requests to the site fail fast for 5 minutes, then 10, 20, 40 and at most 1 hour for each ban that follows, until a request sent after the pause succeeds. Searches meanwhile return empty results, the ban is logged once per pause, and `/api/status` and `/health` report `degraded` with a `reason`. Results already cached keep being served.
+
+Real Cloudflare challenges still go to the solver, as described above.
 
 ## Run
 
@@ -93,6 +103,17 @@ Run the container as the user that owns the media (`user: "1000:1000"` in the ex
 
 If you search through Prowlarr, add the indexer to Sonarr/Radarr via Prowlarr as usual (Prowlarr passes the magnet on); no extra setup is needed. In Sonarr, leave "Remove Completed" on: once a file is imported the finished entry is removed together with the downloaded copy.
 
+### Download queue
+
+Jobs and categories are kept in the SQLite database (`DATA_DIR/cache.db`), so a restart or crash loses nothing.
+
+- **Parallelism.** `MAX_DOWNLOADS` (default `2`) episodes download at once; a season grab's other episodes show as `queuedDL` and start as slots free up.
+- **Restart.** Unfinished downloads (running or queued) start again by themselves and continue the `.part` file with a `Range` request; if the server does not answer `206` the file is downloaded again from the start. Finished jobs whose file is still in the downloads folder stay as `pausedUP` until the client deletes them; a finished job whose file is gone is dropped. `.part` files that no job owns are deleted at startup. Categories are restored too, so `save_path` is right before the first new add.
+- **Retries.** A failed attempt (5xx, timeout, stall, a Cloudflare page instead of a video, a short body) is retried up to 3 times in all, 2 s then 4 s apart, each time asking the site for a fresh file URL and resuming the partial file. A 404/410 is not retried. Only after that is the job `error`, which Sonarr/Radarr show as a warning until you remove it; adding the same episode again retries it.
+- **Stopped adds.** `paused=true` / `stopped=true` on `torrents/add` adds the job as `pausedDL` without downloading. `torrents/pause` and `stop` pause a job (the partial file stays), `resume` and `start` continue it.
+- **Delete.** `torrents/delete` stops the job and removes its row and partial file; with `deleteFiles=true` it also removes the finished file.
+- **One episode, one category.** An episode is tracked once, whichever client grabbed it. If Sonarr and Radarr (or two categories) ask for the same episode while it is still in the queue, the second add is answered `Fails.` and logged; it works again once the first job is deleted. Set `Remove Completed` as described above so finished entries do not linger.
+
 ### TVDB numbering
 
 AnimeWorld lists every season as its own series, numbered from episode 1 ("Frieren 2", episode 3), while Sonarr thinks in TVDB seasons. The service bridges them with the [Fribb/anime-lists](https://github.com/Fribb/anime-lists) `anime-list-full.json`, which maps MyAnimeList and AniList ids to a TVDB id, TVDB season and episode offset (a second cour continuing a season has an offset: AnimeWorld episode 1 of "Re:Zero 2 Part 2" is TVDB `S02E14`). It also carries the TMDB and IMDb ids.
@@ -134,7 +155,7 @@ curl 'localhost:9698/api?t=tvsearch&tvdbid=424536&season=2&ep=3&apikey=dev'   # 
 curl 'localhost:9698/api?t=movie&imdbid=tt5311514&apikey=dev'                # Your Name. (sub and dub)
 ```
 
-Requires Go 1.27+. The first search of a title makes a few hundred requests to the site (series pages, then file info and a `HEAD` per episode); repeat searches come from the cache.
+Requires Go 1.27+. A cold search of a title makes a few dozen requests to the site at most (the search page, a series page and its redirect per hit, and up to `SIZE_LOOKUPS` file-info lookups, paced by `ORIGIN_RPS`); repeat searches come from the cache. Do not point tests at the live site: use the fixtures in `internal/animeworld/testdata` and fake servers.
 
 ## Credits
 

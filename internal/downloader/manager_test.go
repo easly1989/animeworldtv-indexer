@@ -43,6 +43,7 @@ func (s *site) serve(token, content string) {
 
 func newManager(t *testing.T, s *site) *Manager {
 	m := New(s, t.TempDir(), nil)
+	m.backoff = 5 * time.Millisecond
 	t.Cleanup(m.Close)
 	return m
 }
@@ -123,8 +124,9 @@ func TestStalledDownloadFails(t *testing.T) {
 	if !strings.Contains(j.Err, "stalled") {
 		t.Errorf("error %q", j.Err)
 	}
-	if left, _ := filepath.Glob(filepath.Join(j.SavePath, "*")); len(left) != 0 {
-		t.Errorf("partial file left: %v", left)
+	// The partial file stays for Resume, but never under the final name.
+	if left, _ := filepath.Glob(filepath.Join(j.SavePath, "*.mp4")); len(left) != 0 {
+		t.Errorf("unfinished file published: %v", left)
 	}
 }
 

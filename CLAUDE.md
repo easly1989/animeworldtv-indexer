@@ -24,7 +24,7 @@ Pure Go, no CGO (SQLite is `modernc.org/sqlite`). Config is environment variable
 
 - `torznab` — HTTP handler: `/api` (`t=caps|search|tvsearch|movie`, apikey check, Torznab XML written by hand to keep the `torznab:` prefix) and `/download?ep=<token>`. Talks to a small `Backend` interface.
 - `indexer` — the service: search → series pages → per-episode releases. Owns caching in SQLite, a shared request semaphore, and the file-size time budget (unmeasured sizes are estimated while lookups finish in the background). Depends on `Site` and `Cache` interfaces so tests use fakes.
-- `animeworld` — scraping. `parse.go` is pure (HTML/JSON in, structs out); `client.go` does the HTTP (one retry on 5xx/transport errors).
+- `animeworld` — scraping. `parse.go` is pure (HTML/JSON in, structs out); `client.go` does the HTTP (one retry on 5xx/transport errors); `polite.go` holds the origin rate limiter (a transport wrapper, so redirect hops count) and the ban handling: a 403/429 without Cloudflare challenge markers is `ErrOriginBlocked` (an `ErrBlocked`), the solver is not called, and origin requests fail fast for 5 min doubling to 1 h. Never test against the live site: it bans IPs.
 - `store` — SQLite key/value cache with per-read max age. Later features add their own tables.
 - `config` — env parsing.
 
