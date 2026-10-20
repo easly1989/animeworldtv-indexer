@@ -18,6 +18,16 @@ type fakeBackend struct {
 	q             string
 	offset, limit int
 	err           error
+	tv            *indexer.TVQuery // set when SearchTV was called
+}
+
+func (f *fakeBackend) SearchTV(ctx context.Context, tq indexer.TVQuery, offset, limit int) ([]indexer.Release, error) {
+	f.tv = &tq
+	rels, err := f.Search(ctx, tq.Q, offset, limit)
+	if err == nil {
+		rels[0].Season, rels[0].Episode, rels[0].TVDBID = 2, 3, 424536
+	}
+	return rels, err
 }
 
 func (f *fakeBackend) Search(_ context.Context, q string, offset, limit int) ([]indexer.Release, error) {
@@ -161,6 +171,54 @@ func TestSearchFeed(t *testing.T) {
 	}
 	if f.Items[0].GUID == f.Items[1].GUID {
 		t.Error("guids must be unique")
+	}
+}
+
+func TestCapsAdvertiseTVParams(t *testing.T) {
+	body := get(newHandler(&fakeBackend{}), "/api?t=caps&apikey=secret").Body.String()
+	if !strings.Contains(body, `<tv-search available="yes" supportedParams="q,season,ep,tvdbid"/>`) {
+		t.Errorf("tv-search params missing:\n%s", body)
+	}
+}
+
+func TestTVSearchPassesIDsToTheBackend(t *testing.T) {
+	tests := []struct {
+		target string
+		want   indexer.TVQuery
+	}{
+		{"/api?t=tvsearch&tvdbid=424536&season=2&ep=3&q=frieren", indexer.TVQuery{Q: "frieren", TVDBID: 424536, Season: 2, Ep: 3}},
+		{"/api?t=tvsearch&tvdbid=424536", indexer.TVQuery{TVDBID: 424536}},
+		{"/api?t=tvsearch&season=x&ep=03&tvdbid=", indexer.TVQuery{Ep: 3}},
+		{"/api?t=tvsearch&ep=2024/05/01", indexer.TVQuery{}}, // daily-style ep is not ours to read
+	}
+	for _, tc := range tests {
+		b := &fakeBackend{}
+		get(newHandler(b), tc.target+"&apikey=secret")
+		if b.tv == nil || *b.tv != tc.want {
+			t.Errorf("%s: backend got %+v, want %+v", tc.target, b.tv, tc.want)
+		}
+	}
+}
+
+func TestPlainSearchIgnoresTVParams(t *testing.T) {
+	b := &fakeBackend{}
+	get(newHandler(b), "/api?t=search&q=x&tvdbid=1&season=2&ep=3&apikey=secret")
+	if b.tv != nil || b.q != "x" {
+		t.Errorf("t=search must use the plain search: tv=%+v q=%q", b.tv, b.q)
+	}
+}
+
+func TestTVItemsCarryTheirNumbering(t *testing.T) {
+	rec := get(newHandler(&fakeBackend{}), "/api?t=tvsearch&tvdbid=424536&apikey=secret")
+	var f feed
+	if err := xml.Unmarshal(rec.Body.Bytes(), &f); err != nil {
+		t.Fatal(err)
+	}
+	if attr(0, f, "tvdbid") != "424536" || attr(0, f, "season") != "2" || attr(0, f, "episode") != "3" {
+		t.Errorf("attrs: %+v", f.Items[0].Attrs)
+	}
+	if attr(1, f, "tvdbid") != "" || attr(1, f, "season") != "" {
+		t.Errorf("an unnumbered item must not claim numbering: %+v", f.Items[1].Attrs)
 	}
 }
 

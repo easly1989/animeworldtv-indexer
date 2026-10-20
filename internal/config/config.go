@@ -18,8 +18,8 @@ type Config struct {
 	BaseURL  string // AnimeWorld; the .tv/.so domains redirect to .ac
 	LogLevel string
 
-	// FlareSolverrURL is the Byparr/FlareSolverr endpoint; unused until the
-	// Cloudflare fallback lands.
+	// FlareSolverrURL is the Byparr/FlareSolverr endpoint used when Cloudflare
+	// challenges a request.
 	FlareSolverrURL string
 
 	// DownloadDir is where the emulated qBittorrent client saves episodes, in
@@ -29,6 +29,9 @@ type Config struct {
 	MaxSeries    int           // series expanded per search
 	Concurrency  int           // simultaneous requests to AnimeWorld
 	SearchBudget time.Duration // how long a search waits for file sizes
+
+	MappingURL     string        // Fribb anime-list-full.json
+	MappingRefresh time.Duration // how often the mapping list is downloaded again
 }
 
 // Load builds a Config from getenv (os.Getenv in production).
@@ -49,11 +52,16 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		return n
 	}
-	budget := str("SEARCH_BUDGET", "40s")
-	d, err := time.ParseDuration(budget)
-	if err != nil || d <= 0 {
-		errs = append(errs, fmt.Sprintf("SEARCH_BUDGET=%q must be a positive duration like 40s", budget))
+	duration := func(key, def string) time.Duration {
+		v := str(key, def)
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			errs = append(errs, fmt.Sprintf("%s=%q must be a positive duration like %s", key, v, def))
+		}
+		return d
 	}
+	d := duration("SEARCH_BUDGET", "40s")
+	refresh := duration("MAPPING_REFRESH", "24h")
 
 	c := Config{
 		APIKey:          getenv("API_KEY"),
@@ -67,6 +75,8 @@ func Load(getenv func(string) string) (Config, error) {
 		MaxSeries:       num("MAX_SERIES", 8, 1),
 		Concurrency:     num("CONCURRENCY", 4, 1),
 		SearchBudget:    d,
+		MappingURL:      str("MAPPING_URL", "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-full.json"),
+		MappingRefresh:  refresh,
 	}
 	if len(errs) > 0 {
 		return c, fmt.Errorf("invalid configuration: %s", strings.Join(errs, "; "))

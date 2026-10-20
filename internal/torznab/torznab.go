@@ -5,6 +5,7 @@ package torznab
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/easly1989/animeworldtv-indexer/internal/animeworld"
 	"github.com/easly1989/animeworldtv-indexer/internal/downloader"
 	"github.com/easly1989/animeworldtv-indexer/internal/indexer"
 )
@@ -27,6 +29,7 @@ const (
 // Backend is what the handler needs from the indexer service.
 type Backend interface {
 	Search(ctx context.Context, q string, offset, limit int) ([]indexer.Release, error)
+	SearchTV(ctx context.Context, tq indexer.TVQuery, offset, limit int) ([]indexer.Release, error)
 }
 
 type Options struct {
@@ -54,7 +57,7 @@ const capsXML = `<?xml version="1.0" encoding="UTF-8"?>
 <limits max="%d" default="%d"/>
 <searching>
 <search available="yes" supportedParams="q"/>
-<tv-search available="yes" supportedParams="q"/>
+<tv-search available="yes" supportedParams="q,season,ep,tvdbid"/>
 <movie-search available="yes" supportedParams="q"/>
 </searching>
 <categories>
@@ -90,7 +93,18 @@ func (h *handler) search(w http.ResponseWriter, r *http.Request) {
 	var rels []indexer.Release
 	if wantsAnime(q.Get("cat")) {
 		var err error
-		rels, err = h.b.Search(r.Context(), strings.TrimSpace(q.Get("q")), offset, limit)
+		if q.Get("t") == "tvsearch" {
+			rels, err = h.b.SearchTV(r.Context(), indexer.TVQuery{
+				Q: strings.TrimSpace(q.Get("q")), TVDBID: atoiOr(q.Get("tvdbid"), 0),
+				Season: atoiOr(q.Get("season"), 0), Ep: atoiOr(q.Get("ep"), 0),
+			}, offset, limit)
+		} else {
+			rels, err = h.b.Search(r.Context(), strings.TrimSpace(q.Get("q")), offset, limit)
+		}
+		if errors.Is(err, animeworld.ErrBlocked) { // Cloudflare in the way: an empty feed, not an error
+			slog.Error("search blocked by Cloudflare, returning no results", "q", q.Get("q"), "err", err)
+			rels, err = nil, nil
+		}
 		if err != nil {
 			slog.Error("search failed", "q", q.Get("q"), "err", err)
 			writeError(w, http.StatusBadGateway, 900, "Search failed: "+err.Error())
@@ -135,9 +149,15 @@ func (h *handler) item(sb *strings.Builder, base string, r indexer.Release) {
 <torznab:attr name="language" value="Italian"/>
 <torznab:attr name="downloadvolumefactor" value="0"/>
 <torznab:attr name="uploadvolumefactor" value="1"/>
-</item>
 `, esc(r.Title), esc(r.Token), esc(link), esc(h.opt.SiteURL+r.SeriesPath), date.UTC().Format(time.RFC1123Z),
 		r.Size, esc(link), r.Size, catAnime, r.Size)
+	if r.TVDBID != 0 {
+		fmt.Fprintf(sb, "<torznab:attr name=\"tvdbid\" value=\"%d\"/>\n", r.TVDBID)
+	}
+	if r.Season != 0 || r.Episode != 0 {
+		fmt.Fprintf(sb, "<torznab:attr name=\"season\" value=\"%d\"/>\n<torznab:attr name=\"episode\" value=\"%d\"/>\n", r.Season, r.Episode)
+	}
+	sb.WriteString("</item>\n")
 }
 
 // download hands the grab to the download client: Sonarr/Radarr follow this

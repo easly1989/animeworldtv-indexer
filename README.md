@@ -2,17 +2,24 @@
 
 A [Torznab](https://torznab.github.io/spec-1.3-draft/) indexer for [AnimeWorld](https://www.animeworld.ac), so Prowlarr, Sonarr and Radarr can search it. One Go binary, one container, SQLite cache.
 
-Status: keyword search and grab-to-import work end to end. Planned next: TVDB mapping, a Cloudflare fallback, a persistent download queue, RSS and movies.
+Status: keyword and TVDB-numbered TV search, a Cloudflare fallback and grab-to-import through an emulated qBittorrent client work end to end. Planned next: a persistent download queue, RSS and movies.
 
 ## What it does
 
 - `GET /api?t=caps` and `GET /api?t=search&q=<title>` (also `tvsearch`, `movie`) return one RSS item per episode, category `5070` (TV/Anime).
-- Titles look like `Sousou no Frieren - 01 [SUB ITA]`. Dubbed entries (separate series on the site) get `[ITA]`.
+- `t=tvsearch` supports `q`, `season`, `ep` and `tvdbid` (see [TVDB numbering](#tvdb-numbering)). `t=search` accepts a trailing `S02E03` in `q` as a season/episode filter; any other `q` (including titles ending in a number) goes to the site as is.
+- Titles look like `Sousou no Frieren S02E03 [SUB ITA]`. Dubbed entries (separate series on the site) get `[ITA]`.
 - Every item has a size and date from a `HEAD` on the episode's direct MP4. Lookups are cached in SQLite and bounded; if a search runs out of time budget, the remaining sizes are estimated from the same series while the real ones finish in the background.
 - An empty `q` returns the site's latest updates, which is what Prowlarr's indexer Test uses.
 - `GET /download?ep=<token>&n=<title>` redirects to a magnet (`magnet:?xt=urn:btih:<hash>&dn=<title>&aw=<token>`). The hash is derived from the episode token; `aw` carries the token itself. Sonarr and Radarr pass that magnet to their download client.
 - `/api/v2/...` emulates the **qBittorrent Web API** (the subset Sonarr and Radarr use). Adding the magnet downloads the episode's MP4 over HTTP to `<DOWNLOAD_DIR>/<category>/<title>.mp4` and reports progress and completion like a torrent, so they import the file from the shared volume. The queue is in memory for now: a restart forgets running downloads.
-- `GET /health` returns JSON status. Logs are JSON on stdout.
+- `GET /health` returns JSON status, including a `solver` object: `configured`, `url`, `cookies_valid` (valid solved Cloudflare cookies are cached) and `expires_at`. Logs are JSON on stdout.
+
+### Cloudflare fallback
+
+AnimeWorld answers plain requests today, but sits behind Cloudflare. When it returns a challenge (403/503 with `cf-mitigated: challenge` or the "Just a moment" page), the indexer asks the FlareSolverr-compatible solver at `FLARESOLVERR_URL` (Byparr, default `http://byparr:8191`) to open the site once, then reuses the returned cookies and user agent for plain requests. They are cached in the SQLite database for 12 hours (surviving restarts) and renewed as soon as a request is challenged again. Only one solve runs at a time; concurrent challenged requests wait for it. A solve can take 40-130 s, so the solver timeout is 120 s and a search that needs one is slow once.
+
+If the solver is unreachable or fails, the error is logged and the Torznab search returns an empty result (not an error); further requests within 30 s fail fast instead of waiting on the solver again.
 
 ## Run
 
@@ -55,6 +62,15 @@ Run the container as the user that owns the media (`user: "1000:1000"` in the ex
 
 If you search through Prowlarr, add the indexer to Sonarr/Radarr via Prowlarr as usual (Prowlarr passes the magnet on); no extra setup is needed. In Sonarr, leave "Remove Completed" on: once a file is imported the finished entry is removed together with the downloaded copy.
 
+### TVDB numbering
+
+AnimeWorld lists every season as its own series, numbered from episode 1 ("Frieren 2", episode 3), while Sonarr thinks in TVDB seasons. The service bridges them with the [Fribb/anime-lists](https://github.com/Fribb/anime-lists) `anime-list-full.json`, which maps MyAnimeList and AniList ids to a TVDB id, TVDB season and episode offset (a second cour continuing a season has an offset: AnimeWorld episode 1 of "Re:Zero 2 Part 2" is TVDB `S02E14`). It also carries the TMDB and IMDb ids.
+
+- Every AnimeWorld series page links its MAL and AniList ids; those are looked up in the list. The list is downloaded in the background (a search never waits for it), kept in the SQLite cache and downloaded again every `MAPPING_REFRESH` (24h). Until the first download finishes, and whenever a refresh fails, searches use the previous copy or, with none, the title heuristic below.
+- `t=tvsearch&tvdbid=…` returns only series mapped to that TVDB id, filtered by `season`/`ep`. If Prowlarr sends no `q`, the show is found by the requested season's MAL title (looked up from AniList and cached; a failed lookup is remembered for an hour), then by shortened forms of it and of the AnimePlanet slug in the list. Series without a mapping are only accepted from your own `q`, never from these fallbacks.
+- A series missing from the list falls back to a heuristic: a trailing season number in the title or slug (`Frieren 2`, `Season 2`, `2nd Season`, `Overlord III`, `-2-ita`) gives that season, otherwise season 1. When the title is given, such unmapped series are returned for a TVDB search too; their season marker is stripped from the title (`Frieren 2` is released as `Frieren S02E03`) so Sonarr matches the show.
+- Releases always use `SxxEyy` titles, which Sonarr parses for standard and Anime-type series. Only an episode with no integer number (such as `12.5`) keeps the site's own number: `Title - 12.5 [SUB ITA]`. Items also carry `tvdbid`, `season` and `episode` Torznab attributes when known.
+
 ### Configuration
 
 All environment variables are listed, with defaults, in [`.env.example`](.env.example).
@@ -66,6 +82,7 @@ go vet ./...
 go test ./...
 API_KEY=dev DATA_DIR=./data go run ./cmd/animeworldtv-indexer
 curl 'localhost:9698/api?t=search&q=frieren&apikey=dev'
+curl 'localhost:9698/api?t=tvsearch&tvdbid=424536&season=2&ep=3&apikey=dev'   # Frieren S02E03
 ```
 
 Requires Go 1.27+. The first search of a title makes a few hundred requests to the site (series pages, then file info and a `HEAD` per episode); repeat searches come from the cache.
