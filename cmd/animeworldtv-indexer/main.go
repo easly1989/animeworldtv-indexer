@@ -19,6 +19,7 @@ import (
 	"github.com/easly1989/animeworldtv-indexer/internal/animeworld"
 	"github.com/easly1989/animeworldtv-indexer/internal/config"
 	"github.com/easly1989/animeworldtv-indexer/internal/indexer"
+	"github.com/easly1989/animeworldtv-indexer/internal/mapping"
 	"github.com/easly1989/animeworldtv-indexer/internal/solver"
 	"github.com/easly1989/animeworldtv-indexer/internal/store"
 	"github.com/easly1989/animeworldtv-indexer/internal/torznab"
@@ -58,8 +59,11 @@ func run() error {
 		sol = solver.New(cfg.FlareSolverrURL, cfg.BaseURL, solverTTL, db)
 		site.UseSolver(sol)
 	}
+	maps := mapping.NewSource(cfg.MappingURL, db, cfg.MappingRefresh)
+	maps.Index(context.Background()) // starts the first download in the background
 	svc := indexer.New(site, db, indexer.Options{
-		MaxSeries: cfg.MaxSeries, Concurrency: cfg.Concurrency, Budget: cfg.SearchBudget,
+		MaxSeries: cfg.MaxSeries, Concurrency: cfg.Concurrency, Budget: cfg.SearchBudget, Mapping: maps,
+		Titles: mapping.NewTitles(mapping.AniListURL, db),
 	})
 
 	mux := http.NewServeMux()

@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/easly1989/animeworldtv-indexer/internal/animeworld"
+	"github.com/easly1989/animeworldtv-indexer/internal/mapping"
 )
 
 const (
@@ -36,18 +39,41 @@ type Cache interface {
 	Put(key string, v any) error
 }
 
+// Mapper supplies the AnimeWorld to TVDB mapping (mapping.Source).
+type Mapper interface {
+	Index(ctx context.Context) *mapping.Index
+}
+
 // Options bound how hard a search may hit the site.
 type Options struct {
 	MaxSeries   int           // series expanded per search
 	Concurrency int           // simultaneous requests to the site
 	Budget      time.Duration // how long a search waits for file sizes
+	Mapping     Mapper        // nil: season numbers come from titles only
+	Titles      Titler        // nil: a TVDB search without a title falls back to the AnimePlanet slug
+}
+
+// Titler gives the MAL title of a series (mapping.Titles).
+type Titler interface {
+	Title(ctx context.Context, mal int) string
+}
+
+// TVQuery is a Torznab tvsearch request; zero fields are unset.
+type TVQuery struct {
+	Q      string
+	TVDBID int
+	Season int
+	Ep     int
 }
 
 // Release is one downloadable episode.
 type Release struct {
 	Title      string
 	Token      string // episode token, what /api/episode/info takes
-	Num        string
+	Num        string // the site's episode number
+	Season     int    // TVDB numbering; both 0 when the site's number is not an integer
+	Episode    int
+	TVDBID     int // 0 when the series is not in the mapping
 	SeriesPath string
 	Dub        bool
 	MALID      int
@@ -90,25 +116,50 @@ func (s *Service) FileURL(ctx context.Context, token string) (string, error) {
 
 // Search returns the releases matching q (latest updates when q is empty),
 // newest episode first, windowed by offset/limit. Only the window's sizes are
-// resolved.
+// resolved. A trailing "S02E03" in q selects that season and episode.
 func (s *Service) Search(ctx context.Context, q string, offset, limit int) ([]Release, error) {
-	hits, err := s.hits(ctx, q)
+	return s.SearchTV(ctx, TVQuery{Q: q}, offset, limit)
+}
+
+// SearchTV is Search for a TV query. With a TVDB id only series the mapping
+// ties to that id are returned (plus unmapped ones when a title was given, which
+// get their season from the title); Season and Ep, when set, keep only that
+// TVDB season and episode.
+func (s *Service) SearchTV(ctx context.Context, tq TVQuery, offset, limit int) ([]Release, error) {
+	kw, season, ep := splitQuery(tq.Q)
+	if tq.Season > 0 {
+		season = tq.Season
+	}
+	if tq.Ep > 0 {
+		ep = tq.Ep
+	}
+	idx := s.mapIndex(ctx)
+	series, err := s.find(ctx, kw, tq.TVDBID, season, idx)
 	if err != nil {
 		return nil, err
 	}
-	if len(hits) > s.opt.MaxSeries {
-		hits = hits[:s.opt.MaxSeries]
-	}
-	series := s.seriesAll(ctx, hits)
 
 	var rels []Release
-	for _, se := range series {
+	for _, nb := range series {
+		se := nb.series
 		for i := len(se.Episodes) - 1; i >= 0; i-- {
 			e := se.Episodes[i]
-			rels = append(rels, Release{
-				Title: releaseTitle(se.Title, e.Num, se.Dub), Token: e.Token, Num: e.Num,
-				SeriesPath: se.Path, Dub: se.Dub, MALID: se.MALID, AniListID: se.AniListID,
-			})
+			r := Release{Token: e.Token, Num: e.Num, SeriesPath: se.Path, Dub: se.Dub,
+				MALID: se.MALID, AniListID: se.AniListID, TVDBID: nb.TVDB}
+			n, err := strconv.Atoi(e.Num)
+			switch {
+			case err == nil && n+nb.Offset >= 1:
+				r.Season, r.Episode = nb.Season, n+nb.Offset
+			case err == nil:
+				continue // before TVDB's first episode: never emit E00
+			case season > 0 || ep > 0:
+				continue // no TVDB number to compare with the request
+			}
+			if season > 0 && r.Season != season || ep > 0 && r.Episode != ep {
+				continue
+			}
+			r.Title = releaseTitle(nb.Title, r.Season, r.Episode, e.Num, se.Dub)
+			rels = append(rels, r)
 		}
 	}
 	if offset > len(rels) {
@@ -119,6 +170,157 @@ func (s *Service) Search(ctx context.Context, q string, offset, limit int) ([]Re
 		rels = rels[:limit]
 	}
 	return rels, s.fillSizes(ctx, rels)
+}
+
+// numbered is a series together with how it maps onto TVDB.
+type numbered struct {
+	series animeworld.Series
+	mapping.Numbering
+}
+
+// findTimeout bounds one whole find: several keywords, each a search plus its
+// series pages, must still answer before Prowlarr gives up.
+var findTimeout = 60 * time.Second
+
+// find returns the series answering a query. Without a TVDB id that is the
+// site's own search for kw. With one, kw is tried first (Prowlarr does not
+// always send a title), then the wanted season's MAL title and AnimePlanet slug,
+// from the full name down to the first word, until every wanted season has
+// turned up. Series are accepted when mapped to tvdb, or, from kw only, unmapped.
+func (s *Service) find(ctx context.Context, kw string, tvdb, season int, idx *mapping.Index) ([]numbered, error) {
+	ctx, cancel := context.WithTimeout(ctx, findTimeout)
+	defer cancel()
+	var want []mapping.Entry
+	var keywords []string
+	if kw != "" || tvdb == 0 {
+		keywords = append(keywords, kw)
+	}
+	if tvdb != 0 {
+		all := idx.ByTVDB(tvdb)
+		for _, e := range all {
+			if season > 0 && e.Season == season || season == 0 && e.Season >= 1 {
+				want = append(want, e)
+			}
+		}
+		// The title comes from a wanted entry, else the first real season; the
+		// group's first entry is often a season 0 special or a movie.
+		src, ok := mapping.Entry{}, false
+		if len(want) > 0 {
+			src, ok = want[0], true
+		} else if i := slices.IndexFunc(all, func(e mapping.Entry) bool { return e.Season >= 1 }); i >= 0 {
+			src, ok = all[i], true
+		}
+		if ok && kw == "" && src.MAL != 0 && s.opt.Titles != nil {
+			keywords = appendUnique(keywords, titleKeywords(s.opt.Titles.Title(ctx, src.MAL))...)
+		}
+		if ok {
+			keywords = appendUnique(keywords, titleKeywords(strings.ReplaceAll(src.Slug, "-", " "))...)
+		}
+	}
+
+	var out []numbered
+	seen := map[string]bool{}
+	for _, k := range keywords {
+		hits, err := s.hits(ctx, k)
+		if err != nil {
+			if len(out) == 0 {
+				return nil, err
+			}
+			slog.Warn("fallback search failed, keeping what was found", "q", k, "err", err)
+			break
+		}
+		if len(hits) > s.opt.MaxSeries {
+			hits = hits[:s.opt.MaxSeries]
+		}
+		for _, se := range s.seriesAll(ctx, hits) {
+			nb := numbered{series: se, Numbering: idx.Resolve(se.MALID, se.AniListID, se.Title, se.Path)}
+			// Mapped to another show: never ours. Unmapped: only on the caller's own title.
+			if seen[se.Path] || tvdb != 0 && nb.TVDB != tvdb && (nb.TVDB != 0 || k != kw) {
+				continue
+			}
+			seen[se.Path] = true
+			out = append(out, nb)
+		}
+		if covered(want, out) {
+			break
+		}
+	}
+	return out, nil
+}
+
+// covered reports whether every wanted entry has a series among found.
+func covered(want []mapping.Entry, found []numbered) bool {
+	if len(want) == 0 {
+		return true
+	}
+	for _, e := range want {
+		ok := false
+		for _, f := range found {
+			if e.MAL != 0 && e.MAL == f.series.MALID || e.AniList != 0 && e.AniList == f.series.AniListID {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// titleKeywords turns a title or slug into search terms, longest first: the
+// title without its season marker, its part before a colon, then its first
+// three, two and one words. The site's search trips on punctuation and on
+// seasonal suffixes, so the short forms are the safety net.
+func titleKeywords(t string) []string {
+	t = mapping.StripSeason(strings.TrimSpace(t), mapping.GuessSeason(t, ""))
+	if t == "" {
+		return nil
+	}
+	out := []string{t}
+	if i := strings.Index(t, ":"); i >= 4 {
+		out = appendUnique(out, t[:i])
+	}
+	w := strings.Fields(t)
+	for _, n := range []int{3, 2, 1} {
+		if n < len(w) {
+			out = appendUnique(out, strings.TrimRight(strings.Join(w[:n], " "), ":-,;"))
+		}
+	}
+	return out
+}
+
+func appendUnique(l []string, items ...string) []string {
+	for _, it := range items {
+		if !slices.Contains(l, it) {
+			l = append(l, it)
+		}
+	}
+	return l
+}
+
+// trailingEp matches a trailing "S02E03" in a query.
+var trailingEp = regexp.MustCompile(`(?i)^(.*\S)\s+S(\d{1,2})E(\d{1,3})$`)
+
+// splitQuery separates the "S02E03" Sonarr appends to a title search from the
+// title. Other trailing numbers ("Kaiju No. 8", "Mob Psycho 100") may belong to
+// the title and reach the site untouched.
+func splitQuery(q string) (kw string, season, ep int) {
+	q = strings.TrimSpace(q)
+	m := trailingEp.FindStringSubmatch(q)
+	if m == nil {
+		return q, 0, 0
+	}
+	season, _ = strconv.Atoi(m[2])
+	ep, _ = strconv.Atoi(m[3])
+	return m[1], season, ep
+}
+
+func (s *Service) mapIndex(ctx context.Context) *mapping.Index {
+	if s.opt.Mapping == nil {
+		return nil
+	}
+	return s.opt.Mapping.Index(ctx)
 }
 
 func (s *Service) hits(ctx context.Context, q string) ([]animeworld.Hit, error) {
@@ -300,15 +502,19 @@ func (s *Service) put(key string, v any) {
 	}
 }
 
-// releaseTitle is shaped like "Title - 01 [SUB ITA]": the absolute-number
-// pattern Sonarr already parses for anime.
-func releaseTitle(title, num string, dub bool) string {
+// releaseTitle is shaped like "Title S02E03 [SUB ITA]", which Sonarr parses
+// for standard and Anime-type series alike. An episode with no TVDB number (a
+// non-integer one such as 12.5) keeps the site's number: "Title - 12.5 [SUB ITA]".
+func releaseTitle(title string, season, ep int, num string, dub bool) string {
 	lang := "SUB ITA"
 	if dub {
 		lang = "ITA"
 	}
-	if n, err := strconv.Atoi(num); err == nil {
-		num = fmt.Sprintf("%02d", n)
+	if season == 0 && ep == 0 {
+		if n, err := strconv.Atoi(num); err == nil {
+			num = fmt.Sprintf("%02d", n)
+		}
+		return fmt.Sprintf("%s - %s [%s]", title, num, lang)
 	}
-	return fmt.Sprintf("%s - %s [%s]", title, num, lang)
+	return fmt.Sprintf("%s S%02dE%02d [%s]", title, season, ep, lang)
 }

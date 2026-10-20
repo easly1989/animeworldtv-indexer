@@ -1,0 +1,274 @@
+[
+ {
+  "type": "MOVIE",
+  "anidb_id": 7,
+  "anilist_id": 164,
+  "animecountdown_id": 36228,
+  "animenewsnetwork_id": 197,
+  "anime-planet_id": "princess-mononoke",
+  "anisearch_id": 3320,
+  "imdb_id": [
+   "tt0119698"
+  ],
+  "kitsu_id": 142,
+  "livechart_id": 3081,
+  "mal_id": 164,
+  "simkl_id": 36228,
+  "themoviedb_id": {
+   "movie": [
+    128
+   ]
+  }
+ },
+ {
+  "type": "TV",
+  "anidb_id": 391,
+  "anilist_id": 690,
+  "animecountdown_id": 39579,
+  "animenewsnetwork_id": 336,
+  "anime-planet_id": "vampire-princess-miyu-tv",
+  "anisearch_id": 2157,
+  "imdb_id": [
+   "tt0158415"
+  ],
+  "kitsu_id": 7754,
+  "livechart_id": 5136,
+  "mal_id": 690,
+  "simkl_id": 39579,
+  "themoviedb_id": {
+   "tv": 42460
+  },
+  "tvdb_id": 70862,
+  "season": {
+   "tvdb": 1,
+   "tmdb": 1
+  },
+  "episode_offset": {
+   "tvdb": 1,
+   "tmdb": 1
+  }
+ },
+ {
+  "type": "TV",
+  "anidb_id": 4597,
+  "anilist_id": 1519,
+  "animecountdown_id": 38764,
+  "animenewsnetwork_id": 6832,
+  "anime-planet_id": "black-lagoon-the-second-barrage",
+  "anisearch_id": 3734,
+  "imdb_id": [
+   "tt0962826"
+  ],
+  "kitsu_id": 1363,
+  "livechart_id": 3667,
+  "mal_id": 1519,
+  "simkl_id": 38764,
+  "themoviedb_id": {
+   "tv": 12598
+  },
+  "tvdb_id": 79604,
+  "season": {
+   "tvdb": 1,
+   "tmdb": 1
+  },
+  "episode_offset": {
+   "tvdb": 12,
+   "tmdb": 12
+  }
+ },
+ {
+  "type": "TV",
+  "anidb_id": 11370,
+  "anilist_id": 21355,
+  "animecountdown_id": 509292,
+  "animenewsnetwork_id": 17360,
+  "anime-planet_id": "re-zero-starting-life-in-another-world",
+  "anisearch_id": 10572,
+  "imdb_id": [
+   "tt5607616"
+  ],
+  "kitsu_id": 11209,
+  "livechart_id": 1723,
+  "mal_id": 31240,
+  "simkl_id": 509292,
+  "themoviedb_id": {
+   "tv": 65942
+  },
+  "tvdb_id": 305089,
+  "season": {
+   "tvdb": 1,
+   "tmdb": 1
+  }
+ },
+ {
+  "type": "OVA",
+  "anidb_id": 13430,
+  "anilist_id": 100049,
+  "animecountdown_id": 717117,
+  "imdb_id": [
+   "tt5607616"
+  ],
+  "simkl_id": 717117,
+  "themoviedb_id": {
+   "tv": 65942
+  },
+  "tvdb_id": 305089,
+  "season": {
+   "tvdb": 0,
+   "tmdb": 0
+  }
+ },
+ {
+  "type": "TV",
+  "anidb_id": 14792,
+  "anilist_id": 108632,
+  "animecountdown_id": 1063491,
+  "animenewsnetwork_id": 22005,
+  "anime-planet_id": "re-zero-starting-life-in-another-world-season-2",
+  "anisearch_id": 14302,
+  "imdb_id": [
+   "tt5607616"
+  ],
+  "kitsu_id": 42198,
+  "livechart_id": 9387,
+  "mal_id": 39587,
+  "simkl_id": 1063491,
+  "themoviedb_id": {
+   "tv": 65942
+  },
+  "tvdb_id": 305089,
+  "season": {
+   "tvdb": 2,
+   "tmdb": 1
+  },
+  "episode_offset": {
+   "tmdb": 26
+  }
+ },
+ {
+  "type": "TV",
+  "anidb_id": 15593,
+  "anilist_id": 119661,
+  "animecountdown_id": 1367345,
+  "animenewsnetwork_id": 23779,
+  "anime-planet_id": "re-zero-starting-life-in-another-world-season-2-part-ii",
+  "anisearch_id": 15319,
+  "imdb_id": [
+   "tt5607616"
+  ],
+  "kitsu_id": 43247,
+  "livechart_id": 10009,
+  "mal_id": 42203,
+  "simkl_id": 1367345,
+  "themoviedb_id": {
+   "tv": 65942
+  },
+  "tvdb_id": 305089,
+  "season": {
+   "tvdb": 2,
+   "tmdb": 1
+  },
+  "episode_offset": {
+   "tvdb": 13,
+   "tmdb": 38
+  }
+ },
+ {
+  "type": "TV",
+  "anidb_id": 17617,
+  "anilist_id": 154587,
+  "animecountdown_id": 1990194,
+  "animenewsnetwork_id": 26334,
+  "anime-planet_id": "frieren-beyond-journeys-end",
+  "anisearch_id": 17669,
+  "imdb_id": [
+   "tt22248376"
+  ],
+  "kitsu_id": 46474,
+  "livechart_id": 11376,
+  "mal_id": 52991,
+  "simkl_id": 1990194,
+  "themoviedb_id": {
+   "tv": 209867
+  },
+  "tvdb_id": 424536,
+  "season": {
+   "tvdb": 1,
+   "tmdb": 1
+  }
+ },
+ {
+  "type": "TV",
+  "anidb_id": 18886,
+  "anilist_id": 182255,
+  "animecountdown_id": 2595284,
+  "animenewsnetwork_id": 33628,
+  "anime-planet_id": "frieren-beyond-journeys-end-season-2",
+  "anisearch_id": 19635,
+  "imdb_id": [
+   "tt22248376"
+  ],
+  "kitsu_id": 49240,
+  "livechart_id": 12860,
+  "mal_id": 59978,
+  "simkl_id": 2595284,
+  "themoviedb_id": {
+   "tv": 209867
+  },
+  "tvdb_id": 424536,
+  "season": {
+   "tvdb": 2,
+   "tmdb": 1
+  },
+  "episode_offset": {
+   "tmdb": 28
+  }
+ },
+ {
+  "type": "TV",
+  "anidb_id": 19,
+  "anilist_id": 197,
+  "animecountdown_id": 41130,
+  "animenewsnetwork_id": 841,
+  "anime-planet_id": "rizelmine",
+  "anisearch_id": 3189,
+  "imdb_id": [
+   "tt0328338"
+  ],
+  "kitsu_id": 174,
+  "livechart_id": 5341,
+  "mal_id": 197,
+  "simkl_id": 41130,
+  "themoviedb_id": {
+   "tv": 34684
+  },
+  "tvdb_id": 83692
+ },
+ {
+  "type": "MOVIE",
+  "anidb_id": 1497,
+  "anilist_id": 20381,
+  "animecountdown_id": 41378,
+  "animenewsnetwork_id": 3303,
+  "anime-planet_id": "kimba-the-white-lion-1966",
+  "anisearch_id": 1503,
+  "imdb_id": [
+   "tt0060555"
+  ],
+  "kitsu_id": 9355,
+  "livechart_id": 8809,
+  "mal_id": 20381,
+  "simkl_id": 41378,
+  "themoviedb_id": {
+   "tv": 8853
+  },
+  "tvdb_id": 81341,
+  "season": {
+   "tvdb": 0,
+   "tmdb": 0
+  },
+  "episode_offset": {
+   "tvdb": -1
+  }
+ }
+]
