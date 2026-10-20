@@ -65,10 +65,7 @@ func (l *limiter) wait(ctx context.Context) error {
 	select {
 	case <-t.C:
 		return nil
-	case <-ctx.Done():
-		l.mu.Lock()
-		l.tokens = min(l.burst, l.tokens+1)
-		l.mu.Unlock()
+	case <-ctx.Done(): // the token is not given back: a later caller may already be timed against it
 		return ctx.Err()
 	}
 }
@@ -132,10 +129,14 @@ func (c *Client) markBlocked(status int) {
 	slog.Error("AnimeWorld refused this IP, pausing all requests to the site", "status", status, "pause", c.pause.String(), "until", c.until.UTC().Format(time.RFC3339))
 }
 
-// clearBlock forgets the pause history after a good response.
+// clearBlock forgets the pause history after a good response. Not while a
+// pause is open: that 200 was in flight before the ban (or a cached page), and
+// clearing would reset the backoff instead of letting it grow.
 func (c *Client) clearBlock() {
 	c.bmu.Lock()
-	c.pause, c.until, c.reason = 0, time.Time{}, ""
+	if !c.now().Before(c.until) {
+		c.pause, c.until, c.reason = 0, time.Time{}, ""
+	}
 	c.bmu.Unlock()
 }
 
@@ -175,8 +176,13 @@ func classify(resp *http.Response) pageKind {
 	if strings.Contains(page, "just a moment") || strings.Contains(page, "cf-browser-verification") {
 		return pageChallenge
 	}
-	if resp.StatusCode == http.StatusServiceUnavailable {
-		return pageOther
+	switch {
+	case resp.StatusCode == http.StatusTooManyRequests:
+		return pageBlocked
+	// The ban is an HTML error page; a 403 in JSON (or empty) is about one
+	// resource, such as a removed episode, and must not pause the whole site.
+	case resp.StatusCode == http.StatusForbidden && strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/html"):
+		return pageBlocked
 	}
-	return pageBlocked
+	return pageOther
 }

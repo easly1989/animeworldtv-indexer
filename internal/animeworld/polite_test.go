@@ -264,24 +264,37 @@ func TestBlockBacksOffExponentiallyAndResets(t *testing.T) {
 	}
 }
 
-func TestOtherRefusalsAreBlocks(t *testing.T) {
+// Every 429 and an HTML 403 are bans; a 403 about one resource (JSON or empty)
+// is not, and must not pause the whole site.
+func TestOtherRefusals(t *testing.T) {
 	for name, tc := range map[string]struct {
 		status int
+		ctype  string
 		body   string
+		ban    bool
 	}{
-		"plain 403": {403, ""},
-		"429":       {429, "slow down"},
-		"429 nginx": {429, "<html><center><h1>429 Too Many Requests</h1></center><hr><center>nginx</center></html>"},
-		"403 no cf": {403, "<h1>403 Forbidden</h1>"},
+		"429":       {429, "", "slow down", true},
+		"429 nginx": {429, "", "<html><center><h1>429 Too Many Requests</h1></center><hr><center>nginx</center></html>", true},
+		"403 no cf": {403, "", "<h1>403 Forbidden</h1>", true},
+		"empty 403": {403, "", "", false},
+		"json 403":  {403, "application/json", `{"error":"forbidden"}`, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.ctype != "" {
+					w.Header().Set("Content-Type", tc.ctype)
+				}
 				w.WriteHeader(tc.status)
 				w.Write([]byte(tc.body))
 			}))
 			defer srv.Close()
-			if _, err := New(srv.URL, srv.Client()).FileURL(context.Background(), "t"); !errors.Is(err, ErrOriginBlocked) {
-				t.Fatalf("err=%v, want ErrOriginBlocked", err)
+			c := New(srv.URL, srv.Client())
+			_, err := c.FileURL(context.Background(), "t")
+			if errors.Is(err, ErrOriginBlocked) != tc.ban || err == nil {
+				t.Fatalf("err=%v, want ban=%v", err, tc.ban)
+			}
+			if (c.Blocked() != "") != tc.ban {
+				t.Errorf("Blocked() = %q, want ban=%v", c.Blocked(), tc.ban)
 			}
 		})
 	}
@@ -304,5 +317,85 @@ func TestServerErrorsDoNotPause(t *testing.T) {
 	}
 	if hits.Load() != 4 || c.Blocked() != "" {
 		t.Errorf("hits=%d blocked=%q", hits.Load(), c.Blocked())
+	}
+}
+
+// A ban seen only by the solver's browser (the site challenges cookie-less
+// clients first) must pause the client too: otherwise every request after the
+// solver's failure backoff would start another full browser load of the site.
+func TestBanSeenByTheSolverPauses(t *testing.T) {
+	var direct, solves atomic.Int32
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		direct.Add(1)
+		w.Header().Set("Cf-Mitigated", "challenge")
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer site.Close()
+	sol := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		solves.Add(1)
+		w.Write([]byte(`{"status":"ok","solution":{"status":403,"userAgent":"x","cookies":[]}}`))
+	}))
+	defer sol.Close()
+	c := New(site.URL, site.Client())
+	c.UseSolver(solver.New(sol.URL, site.URL, time.Hour, nil))
+	if _, err := c.FileURL(context.Background(), "t"); !errors.Is(err, ErrOriginBlocked) || c.Blocked() == "" {
+		t.Fatalf("err=%v blocked=%q, want a pause", err, c.Blocked())
+	}
+	if _, err := c.FileURL(context.Background(), "t"); !errors.Is(err, ErrOriginBlocked) {
+		t.Fatalf("second call: %v", err)
+	}
+	if direct.Load() != 1 || solves.Load() != 1 {
+		t.Errorf("site hit %d times, solver %d times; want 1 and 1", direct.Load(), solves.Load())
+	}
+}
+
+// A 200 that was already in flight when the ban arrived must not lift the
+// pause, or the backoff would restart at its minimum instead of growing.
+func TestInFlightSuccessKeepsThePause(t *testing.T) {
+	release, started := make(chan struct{}), make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/slow" {
+			close(started)
+			<-release
+			w.Write([]byte(`{"grabber":"x"}`))
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte("<html><h1>403 Forbidden</h1></html>"))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, srv.Client())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = c.do(context.Background(), http.MethodGet, srv.URL+"/slow", func(*http.Response) error { return nil })
+	}()
+	<-started
+	if err := c.do(context.Background(), http.MethodGet, srv.URL+"/ban", func(*http.Response) error { return nil }); !errors.Is(err, ErrOriginBlocked) {
+		t.Fatalf("setup: %v", err)
+	}
+	close(release)
+	<-done
+	if c.Blocked() == "" {
+		t.Error("the pause was lifted by a request that started before the ban")
+	}
+}
+
+// One forbidden episode must not stop requests for the others.
+func TestForbiddenResourceDoesNotPauseTheSite(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("id") == "gone" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"forbidden"}`))
+			return
+		}
+		w.Write([]byte(`{"grabber":"x"}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, srv.Client())
+	_, _ = c.FileURL(context.Background(), "gone")
+	if _, err := c.FileURL(context.Background(), "ok"); err != nil {
+		t.Errorf("a 403 on one episode paused the client: %v", err)
 	}
 }

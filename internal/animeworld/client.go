@@ -147,7 +147,15 @@ func (c *Client) do(ctx context.Context, method, rawURL string, handle func(*htt
 		var gen uint64
 		if retry, gen, err = c.once(ctx, method, rawURL, handle); errors.Is(err, errChallenge) && c.solver != nil && !solved {
 			solved = true
+			if perr := c.pausedErr(); perr != nil { // a ban meanwhile: a solve would only hit it again
+				return perr
+			}
 			if serr := c.solver.Refresh(ctx, gen); serr != nil {
+				var refused solver.SiteRefused
+				if errors.As(serr, &refused) {
+					c.markBlocked(refused.Status)
+					return fmt.Errorf("%w: %w", ErrOriginBlocked, serr)
+				}
 				return fmt.Errorf("%w: %w", ErrBlocked, serr)
 			}
 			retry, _, err = c.once(ctx, method, rawURL, handle)

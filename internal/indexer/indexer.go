@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/easly1989/animeworldtv-indexer/internal/animeworld"
@@ -105,6 +106,7 @@ type Service struct {
 
 	mu       sync.Mutex
 	inflight map[string]*call
+	lookups  atomic.Bool // a background batch of size lookups is running
 }
 
 func New(site Site, cache Cache, opt Options) *Service {
@@ -392,7 +394,13 @@ func (s *Service) seriesAll(ctx context.Context, hits []animeworld.Hit) []animew
 func (s *Service) fillSizes(ctx context.Context, rels []Release) error {
 	calls := make([]*call, len(rels))
 	var fresh []lookup
-	quota := s.opt.SizeLookups
+	// One batch at a time across searches, so the backlog of lookups stays
+	// bounded; a search that finds one running estimates its uncached sizes.
+	quota := 0
+	batch := s.opt.SizeLookups > 0 && s.lookups.CompareAndSwap(false, true)
+	if batch {
+		quota = s.opt.SizeLookups
+	}
 	for i, r := range rels {
 		var m animeworld.FileMeta
 		if s.cache.Get("meta:"+r.Token, metaTTL, &m) {
@@ -411,6 +419,8 @@ func (s *Service) fillSizes(ctx context.Context, rels []Release) error {
 	}
 	if len(fresh) > 0 {
 		go s.runLookups(context.WithoutCancel(ctx), fresh)
+	} else if batch {
+		s.lookups.Store(false)
 	}
 
 	timer := time.NewTimer(s.opt.Budget)
@@ -502,6 +512,7 @@ func (s *Service) claim(token string) (c *call, isNew bool) {
 // the site's rate limit as a single request instead of ten. It runs detached
 // from the request, so an abandoned search still warms the cache.
 func (s *Service) runLookups(ctx context.Context, jobs []lookup) {
+	defer s.lookups.Store(false)
 	for _, j := range jobs {
 		s.sem <- struct{}{}
 		j.c.meta, j.c.err = s.loadMeta(ctx, j.token)
