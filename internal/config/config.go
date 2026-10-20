@@ -27,6 +27,10 @@ type Config struct {
 	// <DownloadDir>/<category>/. Sonarr/Radarr must see the same path.
 	DownloadDir string
 
+	// MaxDownloads is how many episodes the qBittorrent client downloads at
+	// once; the rest wait as queuedDL.
+	MaxDownloads int
+
 	MaxSeries    int           // series expanded per search
 	Concurrency  int           // simultaneous requests to AnimeWorld
 	SearchBudget time.Duration // how long a search waits for file sizes
@@ -83,6 +87,7 @@ func Load(getenv func(string) string) (Config, error) {
 		LogLevel:        strings.ToUpper(str("LOG_LEVEL", "INFO")),
 		FlareSolverrURL: str("FLARESOLVERR_URL", "http://byparr:8191"),
 		DownloadDir:     str("DOWNLOAD_DIR", "/downloads"),
+		MaxDownloads:    num("MAX_DOWNLOADS", 2, 1),
 		MaxSeries:       num("MAX_SERIES", 8, 1),
 		Concurrency:     num("CONCURRENCY", 4, 1),
 		SearchBudget:    d,
