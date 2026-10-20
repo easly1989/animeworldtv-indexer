@@ -18,8 +18,8 @@ type Config struct {
 	BaseURL  string // AnimeWorld; the .tv/.so domains redirect to .ac
 	LogLevel string
 
-	// FlareSolverrURL is the Byparr/FlareSolverr endpoint; unused until the
-	// Cloudflare fallback lands.
+	// FlareSolverrURL is the Byparr/FlareSolverr endpoint used when Cloudflare
+	// challenges a request.
 	FlareSolverrURL string
 
 	MaxSeries    int           // series expanded per search
