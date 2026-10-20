@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +32,7 @@ var world = map[string]fakeSeries{
 	"/play/rezero-2.f":                          {"Re:Zero 2nd Season", 39587, 13, false},
 	"/play/rezero-2-part-2.g":                   {"Re:Zero 2nd Season Part 2", 42203, 12, false},
 	"/play/foo-2.h":                             {"Foo 2", 0, 5, false},
+	"/play/frieren-mini.i":                      {"Frieren Mini", 0, 3, false},
 }
 
 func worldSite(onlyFor ...string) *fakeSite {
@@ -62,6 +64,8 @@ func worldHits(q string) []animeworld.Hit {
 			"/play/frieren-beyond-journeys-end-2.c", "/play/frieren-beyond-journeys-end-2-ita.d", "/play/black-clover.e"}
 	case "rezero":
 		paths = []string{"/play/rezero-2.f", "/play/rezero-2-part-2.g"}
+	case "frieren beyond":
+		paths = []string{"/play/frieren-mini.i"}
 	case "foo":
 		paths = []string{"/play/foo-2.h", "/play/sousou-no-frieren.a"}
 	}
@@ -74,6 +78,7 @@ func worldHits(q string) []animeworld.Hit {
 
 func testMapping() *mapping.Index {
 	return mapping.NewIndex([]mapping.Entry{
+		{MAL: 1111, TVDB: 424536, Season: 0, Slug: "frieren-ova"}, // sorts first: must not be the title source
 		{MAL: 52991, TVDB: 424536, Season: 1, Slug: "frieren-beyond-journeys-end"},
 		{MAL: 59978, TVDB: 424536, Season: 2, Slug: "frieren-beyond-journeys-end-season-2"},
 		{MAL: 39587, TVDB: 305089, Season: 2},
@@ -151,9 +156,9 @@ func TestSearchTVFindsTheShowFromTheMappingWhenNoTitleIsGiven(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"frieren beyond journeys end", "frieren beyond", "frieren"}
+	want := []string{"frieren beyond journeys end", "frieren beyond journeys", "frieren beyond", "frieren"}
 	if !reflect.DeepEqual(site.queries, want) {
-		t.Errorf("queries %q, want %q (full slug first, then shorter)", site.queries, want)
+		t.Errorf("queries %q, want %q (slug of the wanted season, full name first, then shorter)", site.queries, want)
 	}
 	if len(rels) != 2 || rels[0].Season != 1 || rels[0].Episode != 1 {
 		t.Errorf("got %+v", rels)
@@ -167,7 +172,7 @@ func (f fakeTitles) Title(_ context.Context, mal int) string { return f[mal] }
 func TestSearchTVWithoutTitleAsksForTheMALTitleFirst(t *testing.T) {
 	site := worldSite("rezero")
 	svc := newTVService(t, site)
-	svc.opt.Titles = fakeTitles{39587: "rezero"}
+	svc.opt.Titles = fakeTitles{39587: "rezero 2nd Season"} // the wanted season's own title; the marker is cut
 	rels, err := svc.SearchTV(context.Background(), TVQuery{TVDBID: 305089, Season: 2, Ep: 3}, 0, 100)
 	if err != nil {
 		t.Fatal(err)
@@ -247,10 +252,14 @@ func TestSplitQuery(t *testing.T) {
 		{"", "", 0, 0},
 		{"Frieren S02E03", "Frieren", 2, 3},
 		{"Sousou no Frieren s2e13", "Sousou no Frieren", 2, 13},
-		{"Frieren 28", "Frieren", 0, 0}, // absolute numbers cannot filter without a TVDB order
+		{"Frieren 28", "Frieren 28", 0, 0}, // a bare number may be part of the title: the site gets it untouched
+		{"Kaiju No. 8", "Kaiju No. 8", 0, 0},
+		{"Steins;Gate 0", "Steins;Gate 0", 0, 0},
+		{"Dororo 2019", "Dororo 2019", 0, 0},
+		{"Fate/Zero 2", "Fate/Zero 2", 0, 0},
 		{"Frieren 2nd Season", "Frieren 2nd Season", 0, 0},
 		{"86", "86", 0, 0},
-		{"Mob Psycho 100", "Mob Psycho", 0, 0},
+		{"Mob Psycho 100", "Mob Psycho 100", 0, 0},
 	}
 	for _, tc := range tests {
 		kw, s, e := splitQuery(tc.q)
@@ -277,5 +286,103 @@ func TestReleaseTitle(t *testing.T) {
 		if got := releaseTitle(tc.title, tc.season, tc.ep, tc.num, tc.dub); got != tc.want {
 			t.Errorf("got %q, want %q", got, tc.want)
 		}
+	}
+}
+
+func TestPlainSearchSendsBareNumbersToTheSite(t *testing.T) {
+	site := worldSite()
+	if _, err := newTVService(t, site).Search(context.Background(), "Mob Psycho 100", 0, 10); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(site.queries, []string{"Mob Psycho 100"}) {
+		t.Errorf("site was asked %q", site.queries)
+	}
+}
+
+func TestTitleKeywords(t *testing.T) {
+	tests := []struct {
+		in   string
+		want []string
+	}{
+		{"Sousou no Frieren", []string{"Sousou no Frieren", "Sousou no", "Sousou"}},
+		{"Frieren: Beyond Journey's End", []string{"Frieren: Beyond Journey's End", "Frieren", "Frieren: Beyond Journey's", "Frieren: Beyond"}},
+		{"Re:Zero kara Hajimeru Isekai Seikatsu 2nd Season",
+			[]string{"Re:Zero kara Hajimeru Isekai Seikatsu", "Re:Zero kara Hajimeru", "Re:Zero kara", "Re:Zero"}},
+		{"frieren beyond journeys end season 2", []string{"frieren beyond journeys end", "frieren beyond journeys", "frieren beyond", "frieren"}},
+		{"Naruto", []string{"Naruto"}},
+		{"", nil},
+	}
+	for _, tc := range tests {
+		if got := titleKeywords(tc.in); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("titleKeywords(%q)\n got %q\nwant %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestSearchTVKeepsWhatWasFoundWhenALaterKeywordFails(t *testing.T) {
+	site := worldSite("frieren")
+	inner := site.searchFn
+	site.searchFn = func(q string) []animeworld.Hit { // "frieren" alone only knows season 1
+		var out []animeworld.Hit
+		for _, h := range inner(q) {
+			if world[h.Path].mal == 52991 {
+				out = append(out, h)
+			}
+		}
+		return out
+	}
+	site.searchErrFor = "frieren beyond journeys end"
+	rels, err := newTVService(t, site).SearchTV(context.Background(), TVQuery{Q: "frieren", TVDBID: 424536, Ep: 1}, 0, 100)
+	if err != nil {
+		t.Fatalf("a failing fallback keyword must not fail the request: %v", err)
+	}
+	if len(rels) != 2 {
+		t.Errorf("season 1 found by the first keyword was lost: %q", titles(rels))
+	}
+}
+
+func TestSearchTVFirstKeywordFailureIsAnError(t *testing.T) {
+	site := worldSite("frieren")
+	site.searchErrFor = "frieren"
+	if _, err := newTVService(t, site).SearchTV(context.Background(), TVQuery{Q: "frieren", TVDBID: 424536}, 0, 100); err == nil {
+		t.Error("nothing found and the site failing must be an error")
+	}
+}
+
+func TestSearchTVAcceptsUnmappedHitsOnlyFromTheCallersTitle(t *testing.T) {
+	// No title: "frieren beyond" (a slug fallback) returns an unmapped series that must not be taken.
+	rels, err := newTVService(t, worldSite("frieren", "frieren beyond")).SearchTV(context.Background(), TVQuery{TVDBID: 424536, Season: 1}, 0, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rels {
+		if r.SeriesPath == "/play/frieren-mini.i" {
+			t.Fatalf("an unmapped series from a fallback keyword leaked: %+v", r)
+		}
+	}
+	if len(rels) != 2*28 {
+		t.Errorf("want season 1 sub and dub (56), got %d", len(rels))
+	}
+}
+
+func TestSearchTVNeverEmitsEpisodeZero(t *testing.T) {
+	svc := newService(t, worldSite("frieren"), time.Second)
+	svc.opt.Mapping = staticMapper{mapping.NewIndex([]mapping.Entry{{MAL: 34572, TVDB: 328724, Season: 1, Offset: -1}})}
+	rels, err := svc.SearchTV(context.Background(), TVQuery{Q: "frieren", TVDBID: 328724}, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Black Clover has episodes 1..3 and offset -1: episode 1 would be E00 and is dropped.
+	var got []string
+	for _, r := range rels {
+		if r.MALID == 34572 {
+			got = append(got, r.Title)
+		}
+		if strings.Contains(r.Title, "E00") {
+			t.Errorf("E00 emitted: %q", r.Title)
+		}
+	}
+	if want := []string{"Black Clover S01E02 [SUB ITA]", "Black Clover S01E01 [SUB ITA]"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }

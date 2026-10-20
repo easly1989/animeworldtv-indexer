@@ -146,9 +146,13 @@ func (s *Service) SearchTV(ctx context.Context, tq TVQuery, offset, limit int) (
 			e := se.Episodes[i]
 			r := Release{Token: e.Token, Num: e.Num, SeriesPath: se.Path, Dub: se.Dub,
 				MALID: se.MALID, AniListID: se.AniListID, TVDBID: nb.TVDB}
-			if n, err := strconv.Atoi(e.Num); err == nil && n+nb.Offset >= 0 {
+			n, err := strconv.Atoi(e.Num)
+			switch {
+			case err == nil && n+nb.Offset >= 1:
 				r.Season, r.Episode = nb.Season, n+nb.Offset
-			} else if season > 0 || ep > 0 {
+			case err == nil:
+				continue // before TVDB's first episode: never emit E00
+			case season > 0 || ep > 0:
 				continue // no TVDB number to compare with the request
 			}
 			if season > 0 && r.Season != season || ep > 0 && r.Episode != ep {
@@ -174,11 +178,18 @@ type numbered struct {
 	mapping.Numbering
 }
 
+// findTimeout bounds one whole find: several keywords, each a search plus its
+// series pages, must still answer before Prowlarr gives up.
+var findTimeout = 60 * time.Second
+
 // find returns the series answering a query. Without a TVDB id that is the
 // site's own search for kw. With one, kw is tried first (Prowlarr does not
-// always send a title), then the show's MAL title and its AnimePlanet slug, from
-// the full name down to the first word, until every wanted season has turned up.
+// always send a title), then the wanted season's MAL title and AnimePlanet slug,
+// from the full name down to the first word, until every wanted season has
+// turned up. Series are accepted when mapped to tvdb, or, from kw only, unmapped.
 func (s *Service) find(ctx context.Context, kw string, tvdb, season int, idx *mapping.Index) ([]numbered, error) {
+	ctx, cancel := context.WithTimeout(ctx, findTimeout)
+	defer cancel()
 	var want []mapping.Entry
 	var keywords []string
 	if kw != "" || tvdb == 0 {
@@ -191,21 +202,19 @@ func (s *Service) find(ctx context.Context, kw string, tvdb, season int, idx *ma
 				want = append(want, e)
 			}
 		}
-		if kw == "" && s.opt.Titles != nil {
-			for _, e := range all {
-				if e.MAL != 0 {
-					if t := s.opt.Titles.Title(ctx, e.MAL); t != "" {
-						keywords = append(keywords, t)
-					}
-					break
-				}
-			}
+		// The title comes from a wanted entry, else the first real season; the
+		// group's first entry is often a season 0 special or a movie.
+		src, ok := mapping.Entry{}, false
+		if len(want) > 0 {
+			src, ok = want[0], true
+		} else if i := slices.IndexFunc(all, func(e mapping.Entry) bool { return e.Season >= 1 }); i >= 0 {
+			src, ok = all[i], true
 		}
-		for _, e := range all {
-			if e.Slug != "" {
-				keywords = appendUnique(keywords, slugKeywords(e.Slug)...)
-				break
-			}
+		if ok && kw == "" && src.MAL != 0 && s.opt.Titles != nil {
+			keywords = appendUnique(keywords, titleKeywords(s.opt.Titles.Title(ctx, src.MAL))...)
+		}
+		if ok {
+			keywords = appendUnique(keywords, titleKeywords(strings.ReplaceAll(src.Slug, "-", " "))...)
 		}
 	}
 
@@ -214,15 +223,19 @@ func (s *Service) find(ctx context.Context, kw string, tvdb, season int, idx *ma
 	for _, k := range keywords {
 		hits, err := s.hits(ctx, k)
 		if err != nil {
-			return nil, err
+			if len(out) == 0 {
+				return nil, err
+			}
+			slog.Warn("fallback search failed, keeping what was found", "q", k, "err", err)
+			break
 		}
 		if len(hits) > s.opt.MaxSeries {
 			hits = hits[:s.opt.MaxSeries]
 		}
 		for _, se := range s.seriesAll(ctx, hits) {
 			nb := numbered{series: se, Numbering: idx.Resolve(se.MALID, se.AniListID, se.Title, se.Path)}
-			// Mapped to another show: never ours. Unmapped: accepted only when the caller gave a title.
-			if seen[se.Path] || tvdb != 0 && nb.TVDB != tvdb && (nb.TVDB != 0 || kw == "") {
+			// Mapped to another show: never ours. Unmapped: only on the caller's own title.
+			if seen[se.Path] || tvdb != 0 && nb.TVDB != tvdb && (nb.TVDB != 0 || k != kw) {
 				continue
 			}
 			seen[se.Path] = true
@@ -255,15 +268,23 @@ func covered(want []mapping.Entry, found []numbered) bool {
 	return true
 }
 
-// slugKeywords turns "frieren-beyond-journeys-end" into search terms, longest
-// first: the whole name, its first two words, its first word. The site's search
-// trips on punctuation in the full title, so the short forms are the safety net.
-func slugKeywords(slug string) []string {
-	w := strings.Split(slug, "-")
-	var out []string
-	for _, n := range []int{len(w), 2, 1} {
-		if n <= len(w) {
-			out = appendUnique(out, strings.Join(w[:n], " "))
+// titleKeywords turns a title or slug into search terms, longest first: the
+// title without its season marker, its part before a colon, then its first
+// three, two and one words. The site's search trips on punctuation and on
+// seasonal suffixes, so the short forms are the safety net.
+func titleKeywords(t string) []string {
+	t = mapping.StripSeason(strings.TrimSpace(t), mapping.GuessSeason(t, ""))
+	if t == "" {
+		return nil
+	}
+	out := []string{t}
+	if i := strings.Index(t, ":"); i >= 4 {
+		out = appendUnique(out, t[:i])
+	}
+	w := strings.Fields(t)
+	for _, n := range []int{3, 2, 1} {
+		if n < len(w) {
+			out = appendUnique(out, strings.TrimRight(strings.Join(w[:n], " "), ":-,;"))
 		}
 	}
 	return out
@@ -278,13 +299,12 @@ func appendUnique(l []string, items ...string) []string {
 	return l
 }
 
-// trailingEp matches a trailing "S02E03" or a bare number in a query.
-var trailingEp = regexp.MustCompile(`(?i)^(.*\S)\s+(?:S(\d{1,2})E(\d{1,3})|\d{1,4})$`)
+// trailingEp matches a trailing "S02E03" in a query.
+var trailingEp = regexp.MustCompile(`(?i)^(.*\S)\s+S(\d{1,2})E(\d{1,3})$`)
 
-// splitQuery separates what Sonarr appends to a title search from the title.
-// "Title S02E03" yields season and episode; "Title 28" (an absolute number)
-// yields only the title, as the site's search cannot use the number and TVDB
-// order is unknown without a TVDB id.
+// splitQuery separates the "S02E03" Sonarr appends to a title search from the
+// title. Other trailing numbers ("Kaiju No. 8", "Mob Psycho 100") may belong to
+// the title and reach the site untouched.
 func splitQuery(q string) (kw string, season, ep int) {
 	q = strings.TrimSpace(q)
 	m := trailingEp.FindStringSubmatch(q)

@@ -20,8 +20,9 @@ type fakeSite struct {
 	metaDelay time.Duration
 	metaFail  bool
 	// Optional overrides; the defaults serve one show with a sub and a dub entry.
-	searchFn func(q string) []animeworld.Hit
-	seriesFn func(path string) animeworld.Series
+	searchErrFor string // a query the site fails on
+	searchFn     func(q string) []animeworld.Hit
+	seriesFn     func(path string) animeworld.Series
 }
 
 func (f *fakeSite) count(k string) int { f.mu.Lock(); defer f.mu.Unlock(); return f.calls[k] }
@@ -39,6 +40,9 @@ func (f *fakeSite) Search(_ context.Context, q string) ([]animeworld.Hit, error)
 	f.mu.Lock()
 	f.queries = append(f.queries, q)
 	f.mu.Unlock()
+	if f.searchErrFor != "" && q == f.searchErrFor {
+		return nil, errors.New("site down")
+	}
 	if f.searchFn != nil {
 		return f.searchFn(q), nil
 	}

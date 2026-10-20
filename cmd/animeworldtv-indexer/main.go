@@ -50,7 +50,7 @@ func run() error {
 	defer db.Close()
 
 	maps := mapping.NewSource(cfg.MappingURL, db, cfg.MappingRefresh)
-	go maps.Index(context.Background()) // warm up so the first search does not wait for the download
+	maps.Index(context.Background()) // starts the first download in the background
 	svc := indexer.New(animeworld.New(cfg.BaseURL, nil), db, indexer.Options{
 		MaxSeries: cfg.MaxSeries, Concurrency: cfg.Concurrency, Budget: cfg.SearchBudget, Mapping: maps,
 		Titles: mapping.NewTitles(mapping.AniListURL, db),

@@ -12,6 +12,29 @@ import (
 	"github.com/easly1989/animeworldtv-indexer/internal/store"
 )
 
+func TestTitlesRemembersFailuresForAWhile(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	st, err := store.Open(filepath.Join(t.TempDir(), "c.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	titles := NewTitles(srv.URL, st)
+	for range 3 {
+		if got := titles.Title(t.Context(), 5); got != "" {
+			t.Errorf("got %q", got)
+		}
+	}
+	if hits.Load() != 1 {
+		t.Errorf("a failed lookup was retried %d times within the back-off", hits.Load())
+	}
+}
+
 func TestTitlesLooksUpOnceAndCaches(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

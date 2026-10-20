@@ -15,7 +15,8 @@ import (
 const AniListURL = "https://graphql.anilist.co"
 
 // Titles finds a series' title from its MAL id, for searches that arrive with a
-// TVDB id but no title. Answers are cached for good.
+// TVDB id but no title. Answers are cached for good, failures for an hour so a
+// dead API does not slow every search.
 type Titles struct {
 	url   string
 	cache Cache
@@ -33,6 +34,23 @@ func (t *Titles) Title(ctx context.Context, mal int) string {
 	if t.cache.Get(key, 365*24*time.Hour, &title) {
 		return title
 	}
+	missKey := fmt.Sprintf("title:miss:mal:%d", mal)
+	var missed bool
+	if t.cache.Get(missKey, time.Hour, &missed) {
+		return ""
+	}
+	title = t.fetch(ctx, mal)
+	if title == "" {
+		_ = t.cache.Put(missKey, true)
+		return ""
+	}
+	if err := t.cache.Put(key, title); err != nil {
+		slog.Warn("title cache write failed", "err", err)
+	}
+	return title
+}
+
+func (t *Titles) fetch(ctx context.Context, mal int) string {
 	body := fmt.Sprintf(`{"query":"{Media(idMal:%d,type:ANIME){title{romaji}}}"}`, mal)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.url, strings.NewReader(body))
 	if err != nil {
@@ -61,9 +79,5 @@ func (t *Titles) Title(ctx context.Context, mal int) string {
 	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil || v.Data.Media.Title.Romaji == "" {
 		return ""
 	}
-	title = v.Data.Media.Title.Romaji
-	if err := t.cache.Put(key, title); err != nil {
-		slog.Warn("title cache write failed", "err", err)
-	}
-	return title
+	return v.Data.Media.Title.Romaji
 }

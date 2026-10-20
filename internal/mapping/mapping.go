@@ -170,12 +170,12 @@ func (i *Index) Resolve(mal, anilist int, title, path string) Numbering {
 	return n
 }
 
-// A trailing season marker: "Season 2", "2nd Season", "II", or a bare number.
+// A trailing season marker: "Season 2", "2nd Season", "Second Season", "II", or a bare number.
 // A bare number is only trusted up to 20 so "Mob Psycho 100" is left alone.
-var seasonRe = regexp.MustCompile(`(?i)^(.*?\S)[\s:–-]+(?:season\s+(\d+)|(\d+)(?:st|nd|rd|th)\s+season|(\d+)|(ii|iii|iv))$`)
+var seasonRe = regexp.MustCompile(`(?i)^(.*?\S)[\s:–-]+(?:season\s+(\d+)|(\d+)(?:st|nd|rd|th)\s+season|(second|third|fourth|fifth)\s+season|(\d+)|(ii|iii|iv))$`)
 
 var (
-	romans    = map[string]int{"ii": 2, "iii": 3, "iv": 4}
+	romans    = map[string]int{"ii": 2, "iii": 3, "iv": 4, "second": 2, "third": 3, "fourth": 4, "fifth": 5}
 	partWords = regexp.MustCompile(`(?i)\b(part|cour|vol\.?|volume|episode|ep\.?|no\.?|#)$`)
 )
 
@@ -192,12 +192,14 @@ func splitSeason(s string) (rest string, season int) {
 	case m[3] != "":
 		season, _ = strconv.Atoi(m[3])
 	case m[4] != "":
-		season, _ = strconv.Atoi(m[4])
+		season = romans[strings.ToLower(m[4])]
+	case m[5] != "":
+		season, _ = strconv.Atoi(m[5])
 		if partWords.MatchString(m[1]) { // "Part 2" is a cour, not a season
 			return s, 0
 		}
 	default:
-		season = romans[strings.ToLower(m[5])]
+		season = romans[strings.ToLower(m[6])]
 	}
 	if season < 1 || season > 20 {
 		return s, 0
