@@ -2,7 +2,7 @@
 
 A [Torznab](https://torznab.github.io/spec-1.3-draft/) indexer for [AnimeWorld](https://www.animeworld.ac), so Prowlarr, Sonarr and Radarr can search it. One Go binary, one container, SQLite cache.
 
-Status: keyword and TVDB-numbered TV search work end to end, with a Cloudflare fallback. Planned next: an emulated qBittorrent API that downloads the episodes, RSS and movies.
+Status: keyword and TVDB-numbered TV search work end to end, with a Cloudflare fallback. RSS (latest episodes) works too. Planned next: an emulated qBittorrent API that downloads the episodes, and movies.
 
 ## What it does
 
@@ -10,7 +10,7 @@ Status: keyword and TVDB-numbered TV search work end to end, with a Cloudflare f
 - `t=tvsearch` supports `q`, `season`, `ep` and `tvdbid` (see [TVDB numbering](#tvdb-numbering)). `t=search` accepts a trailing `S02E03` in `q` as a season/episode filter; any other `q` (including titles ending in a number) goes to the site as is.
 - Titles look like `Sousou no Frieren S02E03 [SUB ITA]`. Dubbed entries (separate series on the site) get `[ITA]`.
 - Every item has a size and date from a `HEAD` on the episode's direct MP4. Lookups are cached in SQLite and bounded; if a search runs out of time budget, the remaining sizes are estimated from the same series while the real ones finish in the background.
-- An empty `q` returns the site's latest updates, which is what Prowlarr's indexer Test uses.
+- `t=tvsearch` or `t=search` without `q` (and without `tvdbid`) is the RSS feed: the latest episodes, see [RSS](#rss). It is also what Prowlarr's indexer Test uses.
 - `GET /download?ep=<token>` currently redirects to the MP4. It will become the hand-off to the download client.
 - `GET /health` returns JSON status, including a `solver` object: `configured`, `url`, `cookies_valid` (valid solved Cloudflare cookies are cached) and `expires_at`. Logs are JSON on stdout.
 
@@ -50,6 +50,14 @@ AnimeWorld lists every season as its own series, numbered from episode 1 ("Frier
 - `t=tvsearch&tvdbid=…` returns only series mapped to that TVDB id, filtered by `season`/`ep`. If Prowlarr sends no `q`, the show is found by the requested season's MAL title (looked up from AniList and cached; a failed lookup is remembered for an hour), then by shortened forms of it and of the AnimePlanet slug in the list. Series without a mapping are only accepted from your own `q`, never from these fallbacks.
 - A series missing from the list falls back to a heuristic: a trailing season number in the title or slug (`Frieren 2`, `Season 2`, `2nd Season`, `Overlord III`, `-2-ita`) gives that season, otherwise season 1. When the title is given, such unmapped series are returned for a TVDB search too; their season marker is stripped from the title (`Frieren 2` is released as `Frieren S02E03`) so Sonarr matches the show.
 - Releases always use `SxxEyy` titles, which Sonarr parses for standard and Anime-type series. Only an episode with no integer number (such as `12.5`) keeps the site's own number: `Title - 12.5 [SUB ITA]`. Items also carry `tvdbid`, `season` and `episode` Torznab attributes when known.
+
+### RSS
+
+Sonarr's RSS sync (every ~15 minutes) and Prowlarr's RSS call the indexer with no `q`. The answer is the site's `/updated` listing, one item per listed episode (a sub and a dub of the same episode are two items), newest first, titled and numbered like a TV search (`Title S02E03 [SUB ITA]`, plus `tvdbid`/`season`/`episode` attributes). `season` and `ep`, if sent, filter that list.
+
+- The listing is cached for 5 minutes. It names the episode, so the series' other episodes are not read; the series page is only fetched for its MAL/AniList ids and cached for 24 hours.
+- `pubDate` is the `Last-Modified` of the episode's MP4, the size its `Content-Length`. Until those are measured the size is an estimate and `pubDate` is when the indexer first listed the episode, never the request time.
+- A call starts at most `2 × MAX_SERIES` series pages and as many file lookups, newest first (and only for the requested `limit`/`offset` window). On a cold cache the feed is incomplete for a call or two and fills up as the lookups finish; an episode whose series page is not available yet is left out rather than numbered by guess. Warm calls only look up episodes that are new.
 
 ### Configuration
 

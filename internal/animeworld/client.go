@@ -47,19 +47,25 @@ func New(baseURL string, hc *http.Client) *Client {
 	return &Client{base: strings.TrimRight(baseURL, "/"), host: host, http: hc, retryDelay: time.Second}
 }
 
-// Search lists series matching q. An empty q returns the latest updates,
-// because the site redirects an empty keyword away.
+// Search lists series matching q. q must not be empty: the site redirects an
+// empty keyword away (see Updated for the latest episodes).
 func (c *Client) Search(ctx context.Context, q string) ([]Hit, error) {
-	path := "/updated"
-	if q != "" {
-		path = "/search?keyword=" + url.QueryEscape(q)
-	}
 	var hits []Hit
-	err := c.do(ctx, http.MethodGet, c.base+path, func(r *http.Response) (err error) {
+	err := c.do(ctx, http.MethodGet, c.base+"/search?keyword="+url.QueryEscape(q), func(r *http.Response) (err error) {
 		hits, err = ParseSearch(r.Body)
 		return
 	})
 	return hits, err
+}
+
+// Updated lists the latest episodes, newest first (the first page of /updated).
+func (c *Client) Updated(ctx context.Context) ([]Update, error) {
+	var ups []Update
+	err := c.do(ctx, http.MethodGet, c.base+"/updated", func(r *http.Response) (err error) {
+		ups, err = ParseUpdated(r.Body)
+		return
+	})
+	return ups, err
 }
 
 // Series fetches a series page by path; the site redirects it to the first episode.
