@@ -25,7 +25,9 @@ func Open(path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1) // SQLite has one writer anyway; this avoids "database is locked"
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS kv (
-		key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)`); err != nil {
+		key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);
+		CREATE TABLE IF NOT EXISTS downloads (hash TEXT PRIMARY KEY, data TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS download_categories (name TEXT PRIMARY KEY)`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -57,4 +59,56 @@ func (s *Store) Put(key string, v any) error {
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
 		key, string(raw), time.Now().Unix())
 	return err
+}
+
+// The download queue (see package downloader): one JSON row per job.
+
+func (s *Store) PutDownload(hash string, data []byte) error {
+	_, err := s.db.Exec(`INSERT INTO downloads (hash, data) VALUES (?, ?)
+		ON CONFLICT(hash) DO UPDATE SET data = excluded.data`, hash, string(data))
+	return err
+}
+
+func (s *Store) DeleteDownload(hash string) error {
+	_, err := s.db.Exec(`DELETE FROM downloads WHERE hash = ?`, hash)
+	return err
+}
+
+func (s *Store) Downloads() ([][]byte, error) {
+	rows, err := s.db.Query(`SELECT data FROM downloads`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out [][]byte
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		out = append(out, []byte(raw))
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) PutCategory(name string) error {
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO download_categories (name) VALUES (?)`, name)
+	return err
+}
+
+func (s *Store) Categories() ([]string, error) {
+	rows, err := s.db.Query(`SELECT name FROM download_categories`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
 }

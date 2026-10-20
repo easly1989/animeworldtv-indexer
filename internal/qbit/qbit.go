@@ -54,10 +54,14 @@ func New(opt Options, dl *downloader.Manager) http.Handler {
 	auth("GET /api/v2/torrents/files", h.files)
 	auth("POST /api/v2/torrents/delete", h.remove)
 	auth("POST /api/v2/torrents/setCategory", h.setCategory)
-	// Calls Sonarr/Radarr may make that mean nothing here: a download starts at
-	// once, there is no queue order, seeding or tagging.
-	for _, p := range []string{"topPrio", "setShareLimits", "setForceStart", "addTags", "pause", "resume",
-		"stop", "start", "increasePrio", "decreasePrio", "bottomPrio", "setSuperSeeding"} {
+	// qBittorrent 5 renamed pause/resume to stop/start.
+	auth("POST /api/v2/torrents/pause", h.each((*downloader.Manager).Pause))
+	auth("POST /api/v2/torrents/stop", h.each((*downloader.Manager).Pause))
+	auth("POST /api/v2/torrents/resume", h.each((*downloader.Manager).Resume))
+	auth("POST /api/v2/torrents/start", h.each((*downloader.Manager).Resume))
+	// Calls Sonarr/Radarr may make that mean nothing here: there is no queue
+	// order, seeding or tagging.
+	for _, p := range []string{"topPrio", "setShareLimits", "setForceStart", "addTags", "increasePrio", "decreasePrio", "bottomPrio", "setSuperSeeding"} {
 		auth("POST /api/v2/torrents/"+p, func(w http.ResponseWriter, _ *http.Request) { ok(w) })
 	}
 	return mux
@@ -143,13 +147,26 @@ func (h *handler) setCategory(w http.ResponseWriter, r *http.Request) {
 	ok(w)
 }
 
+// each applies f to the "hashes" of a request.
+func (h *handler) each(f func(*downloader.Manager, string) bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		for _, hash := range h.hashes(r) {
+			f(h.dl, hash)
+		}
+		ok(w)
+	}
+}
+
 // add takes one magnet per line in "urls". Uploaded .torrent files are not
-// supported: the feed never serves any.
+// supported: the feed never serves any. "paused" (or "stopped", its qBittorrent
+// 5 name) adds the download without starting it. An episode already live under
+// another category is refused with "Fails." (see downloader.Manager.Add).
 func (h *handler) add(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(8 << 20); err != nil && !errors.Is(err, http.ErrNotMultipart) {
 		text(w, "Fails.")
 		return
 	}
+	paused := r.FormValue("paused") == "true" || r.FormValue("stopped") == "true"
 	var added int
 	for _, raw := range strings.Split(r.FormValue("urls"), "\n") {
 		if raw = strings.TrimSpace(raw); raw == "" {
@@ -157,7 +174,7 @@ func (h *handler) add(w http.ResponseWriter, r *http.Request) {
 		}
 		token, name, err := downloader.ParseMagnet(raw)
 		if err == nil {
-			_, err = h.dl.Add(token, name, r.FormValue("category"))
+			_, err = h.dl.AddPaused(token, name, r.FormValue("category"), paused)
 		}
 		if err != nil {
 			text(w, "Fails.")

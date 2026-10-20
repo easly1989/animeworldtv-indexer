@@ -44,8 +44,14 @@ func toTorrent(j downloader.Job) torrent {
 		t.CompletionOn = j.Finished.Unix()
 	case downloader.Failed:
 		t.State = "error"
-	default:
+	default: // downloading, queued or paused: all show partial progress
 		t.State, t.DLSpeed = "downloading", j.Speed
+		switch j.State {
+		case downloader.Queued:
+			t.State = "queuedDL"
+		case downloader.Paused:
+			t.State = "pausedDL"
+		}
 		if j.Size > 0 {
 			t.Progress = float64(j.Done) / float64(j.Size)
 			// qBittorrent never shows 1 until the torrent is complete.
