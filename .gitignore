@@ -1,5 +1,7 @@
 .idea
-src/test
-target
-build
-AnimeDownloader.iml
+/bin/
+/data/
+.env
+*.db
+*.db-shm
+*.db-wal
