@@ -22,6 +22,7 @@ type Hit struct {
 	Title  string `json:"title"`
 	JTitle string `json:"jtitle"`
 	Dub    bool   `json:"dub"`
+	Movie  bool   `json:"movie,omitempty"` // the listing's "Movie" badge
 }
 
 // Episode is one episode of a series. Token is what /api/episode/info takes.
@@ -38,6 +39,8 @@ type Series struct {
 	Dub       bool      `json:"dub"`
 	MALID     int       `json:"mal_id,omitempty"`
 	AniListID int       `json:"anilist_id,omitempty"`
+	Category  string    `json:"category,omitempty"` // the site's "Categoria", e.g. "Movie", "TV", "OVA"
+	Year      int       `json:"year,omitempty"`     // release year, 0 when unknown
 	Episodes  []Episode `json:"episodes"`
 }
 
@@ -46,6 +49,7 @@ var (
 	extIDRe      = regexp.MustCompile(`/anime/(\d+)`)
 	dubSlugRe    = regexp.MustCompile(`-ita\.[^./]+$`)
 	dubSuffixRe  = regexp.MustCompile(`\s*\(ITA\)\s*$`)
+	yearRe       = regexp.MustCompile(`\b(?:19|20)\d\d\b`)
 )
 
 // SeriesPath reduces a /play/<slug>[/<token>] link to /play/<slug>.
@@ -83,7 +87,8 @@ func ParseSearch(r io.Reader) ([]Hit, error) {
 		}
 		seen[path] = true
 		jt, _ := a.Attr("data-jtitle")
-		hits = append(hits, Hit{Path: path, Title: CleanTitle(a.Text()), JTitle: CleanTitle(jt), Dub: IsDub(path)})
+		hits = append(hits, Hit{Path: path, Title: CleanTitle(a.Text()), JTitle: CleanTitle(jt), Dub: IsDub(path),
+			Movie: a.Parent().Find(".status .movie").Length() > 0})
 	})
 	return hits, nil
 }
@@ -103,6 +108,16 @@ func ParseSeries(r io.Reader) (Series, error) {
 	s.JTitle = CleanTitle(s.JTitle)
 	s.MALID = externalID(doc, "a#mal-button")
 	s.AniListID = externalID(doc, "a#anilist-button")
+
+	doc.Find("dl.meta dt").Each(func(_ int, dt *goquery.Selection) {
+		val := strings.TrimSpace(dt.NextFiltered("dd").Text())
+		switch strings.TrimSpace(dt.Text()) {
+		case "Categoria:":
+			s.Category = val
+		case "Data di Uscita:":
+			s.Year, _ = strconv.Atoi(yearRe.FindString(val))
+		}
+	})
 
 	seen := map[string]bool{}
 	doc.Find("a[data-episode-num][data-id]").Each(func(_ int, a *goquery.Selection) {
