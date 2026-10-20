@@ -24,6 +24,7 @@ type Options struct {
 	SiteURL string
 
 	Reachable func() bool             // did the last request to the site go through
+	Reason    func() string           // nil or "": why the site is unusable right now (an IP ban, say)
 	Solver    func() solver.Status    // nil: no solver
 	Jobs      func() []downloader.Job // nil: empty queue
 
@@ -44,10 +45,38 @@ func New(hub *Hub, opt Options) *Server {
 	return &Server{hub: hub, opt: opt, started: time.Now()}
 }
 
-// Register mounts both endpoints on mux.
+// Register mounts the endpoints on mux. /health needs no key.
 func (s *Server) Register(mux *http.ServeMux) {
+	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /api/status", s.auth(s.status))
 	mux.HandleFunc("GET /api/logs", s.auth(s.logs))
+}
+
+// degraded says whether the site is unusable, and why when it is known.
+func (s *Server) degraded() (reachable bool, reason string) {
+	reachable = s.opt.Reachable == nil || s.opt.Reachable()
+	if s.opt.Reason != nil {
+		reason = s.opt.Reason()
+	}
+	return reachable, reason
+}
+
+// health is the liveness probe: always 200, with "degraded" and a reason while
+// the site is refusing us. A restart would not help, so the code stays 200.
+func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
+	reachable, reason := s.degraded()
+	body := map[string]any{"status": "ok", "version": s.opt.Version, "site": s.opt.SiteURL}
+	if !reachable || reason != "" {
+		body["status"] = "degraded"
+	}
+	if reason != "" {
+		body["reason"] = reason
+	}
+	if s.opt.Solver != nil {
+		body["solver"] = s.opt.Solver()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // auth accepts the key as the X-Api-Key header or the apikey query parameter.
@@ -99,9 +128,9 @@ type errorItem struct {
 }
 
 func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
-	reachable := s.opt.Reachable == nil || s.opt.Reachable()
+	reachable, reason := s.degraded()
 	state := "ok"
-	if !reachable {
+	if !reachable || reason != "" {
 		state = "degraded"
 	}
 	var sv solver.Status
@@ -123,7 +152,7 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	body := map[string]any{
 		"service":        service,
 		"version":        s.opt.Version,
 		"uptime_seconds": int64(time.Since(s.started).Seconds()),
@@ -132,7 +161,11 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 		"solver":         solverInfo{sv.Configured, sv.URL, sv.CookiesValid, sv.ExpiresAt},
 		"queue":          queue,
 		"errors":         errs,
-	})
+	}
+	if reason != "" {
+		body["reason"] = reason
+	}
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // item maps a download job to the contract's states. A state this package does

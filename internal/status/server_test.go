@@ -151,6 +151,34 @@ func TestStatusEmptyAndDegraded(t *testing.T) {
 	}
 }
 
+// An origin ban shows as degraded with a reason, on the keyed status API and on
+// the open /health probe (which stays 200 so the container is not restarted).
+func TestBlockedIsDegradedWithReason(t *testing.T) {
+	reason := "AnimeWorld refused this IP (HTTP 403)"
+	_, _, srv := fixture(t, Options{Reachable: func() bool { return false }, Reason: func() string { return reason }})
+	for _, path := range []string{"/api/status", "/health"} {
+		resp := get(t, srv.URL+path, key)
+		var p struct{ Status, Reason string }
+		if err := json.NewDecoder(resp.Body).Decode(&p); err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 200 || p.Status != "degraded" || p.Reason != reason {
+			t.Errorf("%s: code=%d %+v", path, resp.StatusCode, p)
+		}
+	}
+
+	_, _, ok := fixture(t, Options{Reason: func() string { return "" }})
+	for _, path := range []string{"/api/status", "/health"} {
+		var raw map[string]json.RawMessage
+		if err := json.NewDecoder(get(t, ok.URL+path, key).Body).Decode(&raw); err != nil {
+			t.Fatal(err)
+		}
+		if string(raw["status"]) != `"ok"` || raw["reason"] != nil {
+			t.Errorf("%s healthy: status=%s reason=%s", path, raw["status"], raw["reason"])
+		}
+	}
+}
+
 func TestAuth(t *testing.T) {
 	_, _, srv := fixture(t, Options{})
 	for _, path := range []string{"/api/status", "/api/logs"} {

@@ -139,6 +139,14 @@ func (s *Solver) Refresh(ctx context.Context, gen uint64) error {
 	return nil
 }
 
+// SiteRefused is a solve whose browser reached the site and got a 403 or 429:
+// a ban on the IP, which no solve can pass.
+type SiteRefused struct{ Status int }
+
+func (e SiteRefused) Error() string {
+	return fmt.Sprintf("solver got HTTP %d from the site: it refuses this IP", e.Status)
+}
+
 type solveResponse struct {
 	Status   string `json:"status"`
 	Message  string `json:"message"`
@@ -175,7 +183,11 @@ func (s *Solver) solve(ctx context.Context) (session, error) {
 	if r.Status != "ok" {
 		return session{}, fmt.Errorf("solver error (HTTP %d): %s", resp.StatusCode, cmp.Or(r.Message, "unknown"))
 	}
-	if r.Solution.Status != http.StatusOK {
+	switch r.Solution.Status {
+	case http.StatusOK:
+	case http.StatusForbidden, http.StatusTooManyRequests:
+		return session{}, SiteRefused{r.Solution.Status}
+	default:
 		return session{}, fmt.Errorf("solver got HTTP %d from the site: challenge not passed", r.Solution.Status)
 	}
 	return session{Cookies: r.Solution.Cookies, UserAgent: r.Solution.UserAgent, SolvedAt: time.Now()}, nil

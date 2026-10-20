@@ -88,7 +88,7 @@ func newService(t *testing.T, site Site, budget time.Duration) *Service {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	return New(site, st, Options{MaxSeries: 8, Concurrency: 4, Budget: budget})
+	return New(site, st, Options{MaxSeries: 8, Concurrency: 4, Budget: budget, SizeLookups: 1000})
 }
 
 func TestSearchBuildsTaggedReleasesWithSizes(t *testing.T) {

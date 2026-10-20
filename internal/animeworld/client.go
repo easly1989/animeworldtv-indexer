@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,7 +30,15 @@ type Client struct {
 	http       *http.Client
 	retryDelay time.Duration
 	solver     *solver.Solver // nil: challenges are not worked around
-	failing    atomic.Bool    // the last request to the site failed (transport error, 5xx or challenge)
+	failing    atomic.Bool    // the last request to the site failed (transport error, 5xx, challenge or block)
+	limit      *limiter       // nil: requests to the site are not rate limited
+
+	bmu                sync.Mutex // guards the block pause below
+	until              time.Time  // requests to the site fail fast until then
+	pause              time.Duration
+	reason             string
+	pauseMin, pauseMax time.Duration
+	now                func() time.Time
 }
 
 // Reachable reports whether the last request to the site went through. It is
@@ -50,7 +58,16 @@ func New(baseURL string, hc *http.Client) *Client {
 	if u != nil {
 		host = u.Host
 	}
-	return &Client{base: strings.TrimRight(baseURL, "/"), host: host, http: hc, retryDelay: time.Second}
+	c := &Client{base: strings.TrimRight(baseURL, "/"), host: host, retryDelay: time.Second,
+		pauseMin: blockPauseMin, pauseMax: blockPauseMax, now: time.Now}
+	wrapped := *hc // keep the caller's client as is; ours routes through the rate limit
+	base := wrapped.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	wrapped.Transport = politeTransport{base: base, c: c}
+	c.http = &wrapped
+	return c
 }
 
 // Search lists series matching q. An empty q returns the latest updates,
@@ -130,7 +147,15 @@ func (c *Client) do(ctx context.Context, method, rawURL string, handle func(*htt
 		var gen uint64
 		if retry, gen, err = c.once(ctx, method, rawURL, handle); errors.Is(err, errChallenge) && c.solver != nil && !solved {
 			solved = true
+			if perr := c.pausedErr(); perr != nil { // a ban meanwhile: a solve would only hit it again
+				return perr
+			}
 			if serr := c.solver.Refresh(ctx, gen); serr != nil {
+				var refused solver.SiteRefused
+				if errors.As(serr, &refused) {
+					c.markBlocked(refused.Status)
+					return fmt.Errorf("%w: %w", ErrOriginBlocked, serr)
+				}
 				return fmt.Errorf("%w: %w", ErrBlocked, serr)
 			}
 			retry, _, err = c.once(ctx, method, rawURL, handle)
@@ -155,6 +180,9 @@ func (c *Client) once(ctx context.Context, method, rawURL string, handle func(*h
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
+		if errors.Is(err, ErrOriginBlocked) { // paused: fail fast, a retry would only wait
+			return false, gen, err
+		}
 		if onSite && ctx.Err() == nil {
 			c.failing.Store(true)
 		}
@@ -162,31 +190,23 @@ func (c *Client) once(ctx context.Context, method, rawURL string, handle func(*h
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		if onSite && isChallenge(resp) {
-			c.failing.Store(true)
-			return false, gen, fmt.Errorf("%s %s: %s: %w", method, rawURL, resp.Status, errChallenge)
-		}
 		if onSite {
+			switch classify(resp) {
+			case pageChallenge:
+				c.failing.Store(true)
+				return false, gen, fmt.Errorf("%s %s: %s: %w", method, rawURL, resp.Status, errChallenge)
+			case pageBlocked:
+				c.failing.Store(true)
+				c.markBlocked(resp.StatusCode)
+				return false, gen, fmt.Errorf("%s %s: %s: %w", method, rawURL, resp.Status, ErrOriginBlocked)
+			}
 			c.failing.Store(resp.StatusCode >= 500)
 		}
 		return resp.StatusCode >= 500, gen, fmt.Errorf("%s %s: %s", method, rawURL, resp.Status)
 	}
 	if onSite {
 		c.failing.Store(false)
+		c.clearBlock()
 	}
 	return false, gen, handle(resp)
-}
-
-// isChallenge recognises a Cloudflare interstitial: a 403 or 503 carrying a
-// cf-mitigated header or the "Just a moment" page.
-func isChallenge(resp *http.Response) bool {
-	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusServiceUnavailable {
-		return false
-	}
-	if resp.Header.Get("Cf-Mitigated") == "challenge" {
-		return true
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	page := strings.ToLower(string(body))
-	return strings.Contains(page, "just a moment") || strings.Contains(page, "challenge-platform") || strings.Contains(page, "cf-browser-verification")
 }

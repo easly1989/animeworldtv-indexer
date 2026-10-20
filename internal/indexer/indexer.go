@@ -4,6 +4,7 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/easly1989/animeworldtv-indexer/internal/animeworld"
@@ -49,6 +51,7 @@ type Options struct {
 	MaxSeries   int           // series expanded per search
 	Concurrency int           // simultaneous requests to the site
 	Budget      time.Duration // how long a search waits for file sizes
+	SizeLookups int           // uncached file sizes resolved per response; 0: all estimated
 	Mapping     Mapper        // nil: season numbers come from titles only
 	Titles      Titler        // nil: a TVDB search without a title falls back to the AnimePlanet slug
 }
@@ -103,6 +106,7 @@ type Service struct {
 
 	mu       sync.Mutex
 	inflight map[string]*call
+	lookups  atomic.Bool // a background batch of size lookups is running
 }
 
 func New(site Site, cache Cache, opt Options) *Service {
@@ -381,19 +385,42 @@ func (s *Service) seriesAll(ctx context.Context, hits []animeworld.Hit) []animew
 	return res
 }
 
-// fillSizes sets Size and Published on every release. Sizes not cached are
-// fetched concurrently; whatever is still missing when the budget runs out (or
-// fails) gets an estimate, while the fetches keep going in the background so
-// the next search finds them cached.
+// fillSizes sets Size and Published on every release. Of the sizes not cached,
+// only the first SizeLookups (the newest episodes) are fetched, one after the
+// other: each costs a request to the site, and the rest is estimated. Whatever
+// is still missing when the budget runs out (or fails) gets an estimate too,
+// while the fetches keep going in the background so the next search finds
+// them cached and moves on to the following episodes.
 func (s *Service) fillSizes(ctx context.Context, rels []Release) error {
 	calls := make([]*call, len(rels))
+	var fresh []lookup
+	// One batch at a time across searches, so the backlog of lookups stays
+	// bounded; a search that finds one running estimates its uncached sizes.
+	quota := 0
+	batch := s.opt.SizeLookups > 0 && s.lookups.CompareAndSwap(false, true)
+	if batch {
+		quota = s.opt.SizeLookups
+	}
 	for i, r := range rels {
 		var m animeworld.FileMeta
 		if s.cache.Get("meta:"+r.Token, metaTTL, &m) {
 			rels[i].Size, rels[i].Published = m.Size, m.Modified
 			continue
 		}
-		calls[i] = s.fetchMeta(ctx, r.Token)
+		if quota == 0 {
+			continue
+		}
+		quota--
+		c, isNew := s.claim(r.Token)
+		calls[i] = c
+		if isNew {
+			fresh = append(fresh, lookup{r.Token, c})
+		}
+	}
+	if len(fresh) > 0 {
+		go s.runLookups(context.WithoutCancel(ctx), fresh)
+	} else if batch {
+		s.lookups.Store(false)
 	}
 
 	timer := time.NewTimer(s.opt.Budget)
@@ -463,30 +490,43 @@ func median(v []int64) int64 {
 	return c[len(c)/2]
 }
 
-// fetchMeta starts (or joins) the lookup of one episode's file size. It runs
-// detached from the request so an abandoned search still warms the cache.
-func (s *Service) fetchMeta(ctx context.Context, token string) *call {
+type lookup struct {
+	token string
+	c     *call
+}
+
+// claim returns the lookup of one episode's file size, and whether the caller
+// must run it (false: another search already has).
+func (s *Service) claim(token string) (c *call, isNew bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if c := s.inflight[token]; c != nil {
-		return c
+		return c, false
 	}
-	c := &call{done: make(chan struct{})}
+	c = &call{done: make(chan struct{})}
 	s.inflight[token] = c
-	bg := context.WithoutCancel(ctx)
-	go func() {
+	return c, true
+}
+
+// runLookups resolves sizes one at a time, so a search's lookups queue behind
+// the site's rate limit as a single request instead of ten. It runs detached
+// from the request, so an abandoned search still warms the cache.
+func (s *Service) runLookups(ctx context.Context, jobs []lookup) {
+	defer s.lookups.Store(false)
+	for _, j := range jobs {
 		s.sem <- struct{}{}
-		c.meta, c.err = s.loadMeta(bg, token)
+		j.c.meta, j.c.err = s.loadMeta(ctx, j.token)
 		<-s.sem
-		if c.err != nil {
-			slog.Warn("file size lookup failed", "episode", token, "err", c.err)
+		switch {
+		case errors.Is(j.c.err, animeworld.ErrOriginBlocked): // logged once by the client
+		case j.c.err != nil:
+			slog.Warn("file size lookup failed", "episode", j.token, "err", j.c.err)
 		}
 		s.mu.Lock()
-		delete(s.inflight, token)
+		delete(s.inflight, j.token)
 		s.mu.Unlock()
-		close(c.done)
-	}()
-	return c
+		close(j.c.done)
+	}
 }
 
 func (s *Service) loadMeta(ctx context.Context, token string) (animeworld.FileMeta, error) {
