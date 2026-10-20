@@ -43,6 +43,26 @@ func TestParseKeepsOnlyUsefulFields(t *testing.T) {
 	}
 }
 
+func TestFilmsAreFoundByIMDbAndTMDBId(t *testing.T) {
+	idx := sampleIndex(t)
+	for _, l := range [][]Entry{idx.ByIMDB("tt0119698"), idx.ByTMDB(128)} {
+		if len(l) != 1 || l[0].MAL != 164 {
+			t.Errorf("got %+v", l)
+		}
+	}
+	// Frieren 2 is a TV show: its ids answer neither lookup (a TMDB id is only unique per kind).
+	if l := idx.ByIMDB("tt22248376"); len(l) != 0 {
+		t.Errorf("a TV show's IMDb id returned %+v", l)
+	}
+	if l := idx.ByTMDB(209867); len(l) != 0 {
+		t.Errorf("a TV show's TMDB id returned %+v", l)
+	}
+	var nilIdx *Index
+	if nilIdx.ByIMDB("tt0119698") != nil || nilIdx.ByTMDB(128) != nil {
+		t.Error("a nil index must be empty")
+	}
+}
+
 func TestByTVDBIsOrderedBySeasonThenOffset(t *testing.T) {
 	var got [][2]int
 	for _, e := range sampleIndex(t).ByTVDB(305089) {

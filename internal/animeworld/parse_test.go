@@ -77,6 +77,26 @@ func TestParseSeries(t *testing.T) {
 	}
 }
 
+func TestParseSearchMarksMovies(t *testing.T) {
+	hits, err := ParseSearch(fixture(t, "search_yourname.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 3 || !hits[0].Movie || !hits[1].Movie || !hits[1].Dub || hits[2].Movie {
+		t.Fatalf("movie badge not read: %+v", hits)
+	}
+}
+
+func TestParseSeriesReadsCategoryAndYear(t *testing.T) {
+	s, err := ParseSeries(fixture(t, "series_yourname.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Category != "Movie" || s.Year != 2016 || s.MALID != 32281 || len(s.Episodes) != 1 {
+		t.Errorf("got %+v", s)
+	}
+}
+
 func TestParseSeriesWithoutTitleFails(t *testing.T) {
 	if _, err := ParseSeries(strings.NewReader("<html></html>")); err == nil {
 		t.Fatal("expected an error for a page without a title")

@@ -21,6 +21,7 @@ import (
 const (
 	catTV        = 5000
 	catAnime     = 5070
+	catMovies    = 2000
 	defaultLimit = 100
 	maxLimit     = 500
 )
@@ -29,6 +30,7 @@ const (
 type Backend interface {
 	Search(ctx context.Context, q string, offset, limit int) ([]indexer.Release, error)
 	SearchTV(ctx context.Context, tq indexer.TVQuery, offset, limit int) ([]indexer.Release, error)
+	SearchMovie(ctx context.Context, mq indexer.MovieQuery, offset, limit int) ([]indexer.Release, error)
 	FileURL(ctx context.Context, token string) (string, error)
 }
 
@@ -58,7 +60,7 @@ const capsXML = `<?xml version="1.0" encoding="UTF-8"?>
 <searching>
 <search available="yes" supportedParams="q"/>
 <tv-search available="yes" supportedParams="q,season,ep,tvdbid"/>
-<movie-search available="yes" supportedParams="q"/>
+<movie-search available="yes" supportedParams="q,imdbid,tmdbid"/>
 </searching>
 <categories>
 <category id="5000" name="TV"><subcat id="5070" name="TV/Anime"/></category>
@@ -91,14 +93,20 @@ func (h *handler) search(w http.ResponseWriter, r *http.Request) {
 	offset := max(atoiOr(q.Get("offset"), 0), 0)
 
 	var rels []indexer.Release
-	if wantsAnime(q.Get("cat")) {
+	movie := q.Get("t") == "movie"
+	if movie && wantsMovies(q.Get("cat")) || !movie && wantsAnime(q.Get("cat")) {
 		var err error
-		if q.Get("t") == "tvsearch" {
+		switch {
+		case q.Get("t") == "tvsearch":
 			rels, err = h.b.SearchTV(r.Context(), indexer.TVQuery{
 				Q: strings.TrimSpace(q.Get("q")), TVDBID: atoiOr(q.Get("tvdbid"), 0),
 				Season: atoiOr(q.Get("season"), 0), Ep: atoiOr(q.Get("ep"), 0),
 			}, offset, limit)
-		} else {
+		case movie:
+			rels, err = h.b.SearchMovie(r.Context(), indexer.MovieQuery{
+				Q: strings.TrimSpace(q.Get("q")), IMDBID: q.Get("imdbid"), TMDBID: atoiOr(q.Get("tmdbid"), 0),
+			}, offset, limit)
+		default:
 			rels, err = h.b.Search(r.Context(), strings.TrimSpace(q.Get("q")), offset, limit)
 		}
 		if errors.Is(err, animeworld.ErrBlocked) { // Cloudflare in the way: an empty feed, not an error
@@ -130,6 +138,10 @@ func (h *handler) search(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) item(sb *strings.Builder, base string, r indexer.Release) {
 	link := base + "/download?ep=" + r.Token
+	cat := catAnime
+	if r.Movie {
+		cat = catMovies
+	}
 	date := r.Published
 	if date.IsZero() {
 		date = time.Now()
@@ -150,7 +162,14 @@ func (h *handler) item(sb *strings.Builder, base string, r indexer.Release) {
 <torznab:attr name="downloadvolumefactor" value="0"/>
 <torznab:attr name="uploadvolumefactor" value="1"/>
 `, esc(r.Title), esc(r.Token), esc(link), esc(h.opt.SiteURL+r.SeriesPath), date.UTC().Format(time.RFC1123Z),
-		r.Size, esc(link), r.Size, catAnime, r.Size)
+		r.Size, esc(link), r.Size, cat, r.Size)
+	if r.IMDB != "" { // "imdb" is the bare number Newznab uses, "imdbid" the tt form; Radarr reads one or the other
+		fmt.Fprintf(sb, "<torznab:attr name=\"imdb\" value=\"%s\"/>\n<torznab:attr name=\"imdbid\" value=\"%s\"/>\n",
+			strings.TrimPrefix(r.IMDB, "tt"), esc(r.IMDB))
+	}
+	if r.TMDBID != 0 {
+		fmt.Fprintf(sb, "<torznab:attr name=\"tmdbid\" value=\"%d\"/>\n", r.TMDBID)
+	}
 	if r.TVDBID != 0 {
 		fmt.Fprintf(sb, "<torznab:attr name=\"tvdbid\" value=\"%d\"/>\n", r.TVDBID)
 	}
@@ -187,6 +206,20 @@ func wantsAnime(cat string) bool {
 	}
 	for _, c := range strings.Split(cat, ",") {
 		if n, _ := strconv.Atoi(strings.TrimSpace(c)); n == catTV || n == catAnime {
+			return true
+		}
+	}
+	return false
+}
+
+// wantsMovies is wantsAnime for a movie search: any Movies category (2000, and
+// the 20xx subcategories Radarr lists) leaves room for ours.
+func wantsMovies(cat string) bool {
+	if cat == "" {
+		return true
+	}
+	for _, c := range strings.Split(cat, ",") {
+		if n, _ := strconv.Atoi(strings.TrimSpace(c)); n >= catMovies && n < catMovies+1000 {
 			return true
 		}
 	}

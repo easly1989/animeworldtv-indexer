@@ -18,6 +18,13 @@ type fakeBackend struct {
 	offset, limit int
 	err           error
 	tv            *indexer.TVQuery // set when SearchTV was called
+	movie         *indexer.MovieQuery
+}
+
+func (f *fakeBackend) SearchMovie(_ context.Context, mq indexer.MovieQuery, _, _ int) ([]indexer.Release, error) {
+	f.movie = &mq
+	return []indexer.Release{{Title: "Your Name. 2016 [SUB ITA]", Token: "t6nzso", SeriesPath: "/play/your-name.QA3xM", Size: 1 << 30,
+		Movie: true, Year: 2016, IMDB: "tt5311514", TMDBID: 372058}}, nil
 }
 
 func (f *fakeBackend) SearchTV(ctx context.Context, tq indexer.TVQuery, offset, limit int) ([]indexer.Release, error) {
@@ -202,6 +209,59 @@ func TestTVSearchPassesIDsToTheBackend(t *testing.T) {
 		get(newHandler(b), tc.target+"&apikey=secret")
 		if b.tv == nil || *b.tv != tc.want {
 			t.Errorf("%s: backend got %+v, want %+v", tc.target, b.tv, tc.want)
+		}
+	}
+}
+
+func TestCapsAdvertiseMovieParams(t *testing.T) {
+	body := get(newHandler(&fakeBackend{}), "/api?t=caps&apikey=secret").Body.String()
+	if !strings.Contains(body, `<movie-search available="yes" supportedParams="q,imdbid,tmdbid"/>`) {
+		t.Errorf("movie-search params missing:\n%s", body)
+	}
+}
+
+func TestMovieSearchPassesIDsToTheBackend(t *testing.T) {
+	tests := []struct {
+		target string
+		want   indexer.MovieQuery
+	}{
+		{"/api?t=movie&imdbid=tt5311514&q=Your+Name", indexer.MovieQuery{Q: "Your Name", IMDBID: "tt5311514"}},
+		{"/api?t=movie&imdbid=5311514", indexer.MovieQuery{IMDBID: "5311514"}},
+		{"/api?t=movie&tmdbid=372058&cat=2000,2010", indexer.MovieQuery{TMDBID: 372058}},
+		{"/api?t=movie&q=your+name", indexer.MovieQuery{Q: "your name"}},
+		{"/api?t=movie&tmdbid=x", indexer.MovieQuery{}},
+	}
+	for _, tc := range tests {
+		b := &fakeBackend{}
+		get(newHandler(b), tc.target+"&apikey=secret")
+		if b.movie == nil || *b.movie != tc.want {
+			t.Errorf("%s: backend got %+v, want %+v", tc.target, b.movie, tc.want)
+		}
+	}
+}
+
+func TestMovieItemsAreMoviesWithTheirIDs(t *testing.T) {
+	rec := get(newHandler(&fakeBackend{}), "/api?t=movie&tmdbid=372058&apikey=secret")
+	var f feed
+	if err := xml.Unmarshal(rec.Body.Bytes(), &f); err != nil || len(f.Items) != 1 {
+		t.Fatalf("err=%v body=%s", err, rec.Body)
+	}
+	for name, want := range map[string]string{"category": "2000", "imdb": "5311514", "imdbid": "tt5311514", "tmdbid": "372058"} {
+		if got := attr(0, f, name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if attr(0, f, "season") != "" || attr(0, f, "tvdbid") != "" {
+		t.Errorf("a film carries no TV numbering: %+v", f.Items[0].Attrs)
+	}
+}
+
+func TestMovieSearchCategories(t *testing.T) {
+	for cat, reaches := range map[string]bool{"2000": true, "2000,2010,2040": true, "5070": false, "5000,5070": false, "": true} {
+		b := &fakeBackend{}
+		get(newHandler(b), "/api?t=movie&q=x&cat="+cat+"&apikey=secret")
+		if (b.movie != nil) != reaches {
+			t.Errorf("cat=%q: backend reached = %v, want %v", cat, b.movie != nil, reaches)
 		}
 	}
 }
