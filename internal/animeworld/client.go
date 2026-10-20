@@ -2,12 +2,22 @@ package animeworld
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/easly1989/animeworldtv-indexer/internal/solver"
 )
+
+// ErrBlocked means Cloudflare refused the request and could not be got past
+// (no solver configured, or it failed). Callers treat it as "no results".
+var ErrBlocked = errors.New("blocked by Cloudflare")
+
+var errChallenge = fmt.Errorf("%w: challenge page", ErrBlocked)
 
 // A browser-like agent: the site sits behind Cloudflare.
 const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
@@ -15,16 +25,26 @@ const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 // Client talks to AnimeWorld over plain HTTP.
 type Client struct {
 	base       string
+	host       string // base's host, to tell the site from the file servers
 	http       *http.Client
 	retryDelay time.Duration
+	solver     *solver.Solver // nil: challenges are not worked around
 }
+
+// UseSolver makes the client answer Cloudflare challenges on the site through s.
+func (c *Client) UseSolver(s *solver.Solver) { c.solver = s }
 
 // New returns a client for the site at baseURL (the .tv/.so domains redirect to .ac).
 func New(baseURL string, hc *http.Client) *Client {
 	if hc == nil {
 		hc = &http.Client{Timeout: 45 * time.Second}
 	}
-	return &Client{base: strings.TrimRight(baseURL, "/"), http: hc, retryDelay: time.Second}
+	u, _ := url.Parse(baseURL)
+	host := ""
+	if u != nil {
+		host = u.Host
+	}
+	return &Client{base: strings.TrimRight(baseURL, "/"), host: host, http: hc, retryDelay: time.Second}
 }
 
 // Search lists series matching q. An empty q returns the latest updates,
@@ -86,8 +106,12 @@ func (c *Client) FileMeta(ctx context.Context, fileURL string) (FileMeta, error)
 
 // do runs a request and hands a 200 response to handle. A transport error or
 // 5xx is retried once: the site is slow and occasionally drops connections.
+//
+// A Cloudflare challenge on the site is solved once (see package solver) and
+// the request repeated with the solved cookies.
 func (c *Client) do(ctx context.Context, method, rawURL string, handle func(*http.Response) error) error {
 	var err error
+	solved := false
 	for attempt := 0; attempt < 2; attempt++ {
 		if attempt > 0 {
 			select {
@@ -97,26 +121,56 @@ func (c *Client) do(ctx context.Context, method, rawURL string, handle func(*htt
 			}
 		}
 		var retry bool
-		if retry, err = c.once(ctx, method, rawURL, handle); !retry {
+		var gen uint64
+		if retry, gen, err = c.once(ctx, method, rawURL, handle); errors.Is(err, errChallenge) && c.solver != nil && !solved {
+			solved = true
+			if serr := c.solver.Refresh(ctx, gen); serr != nil {
+				return fmt.Errorf("%w: %w", ErrBlocked, serr)
+			}
+			retry, _, err = c.once(ctx, method, rawURL, handle)
+		}
+		if !retry {
 			return err
 		}
 	}
 	return err
 }
 
-func (c *Client) once(ctx context.Context, method, rawURL string, handle func(*http.Response) error) (retry bool, err error) {
+// once also reports the solver generation whose cookies the request carried.
+func (c *Client) once(ctx context.Context, method, rawURL string, handle func(*http.Response) error) (retry bool, gen uint64, err error) {
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	req.Header.Set("User-Agent", userAgent)
+	onSite := req.URL.Host == c.host // solved cookies are for the site, not the file servers
+	if c.solver != nil && onSite {
+		gen = c.solver.Apply(req)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return true, err
+		return true, gen, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return resp.StatusCode >= 500, fmt.Errorf("%s %s: %s", method, rawURL, resp.Status)
+		if onSite && isChallenge(resp) {
+			return false, gen, fmt.Errorf("%s %s: %s: %w", method, rawURL, resp.Status, errChallenge)
+		}
+		return resp.StatusCode >= 500, gen, fmt.Errorf("%s %s: %s", method, rawURL, resp.Status)
 	}
-	return false, handle(resp)
+	return false, gen, handle(resp)
+}
+
+// isChallenge recognises a Cloudflare interstitial: a 403 or 503 carrying a
+// cf-mitigated header or the "Just a moment" page.
+func isChallenge(resp *http.Response) bool {
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusServiceUnavailable {
+		return false
+	}
+	if resp.Header.Get("Cf-Mitigated") == "challenge" {
+		return true
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	page := strings.ToLower(string(body))
+	return strings.Contains(page, "just a moment") || strings.Contains(page, "challenge-platform") || strings.Contains(page, "cf-browser-verification")
 }
