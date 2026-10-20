@@ -84,6 +84,12 @@ type Release struct {
 	Size       int64
 	Estimated  bool // Size is a guess; the real one is still being fetched
 	Published  time.Time
+
+	// Films only (SearchMovie): Season and Episode stay 0.
+	Movie  bool
+	Year   int    // 0 when the site gives none
+	IMDB   string // "tt…", only when the list ties the film to one
+	TMDBID int
 }
 
 type call struct {

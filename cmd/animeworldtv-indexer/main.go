@@ -18,9 +18,12 @@ import (
 
 	"github.com/easly1989/animeworldtv-indexer/internal/animeworld"
 	"github.com/easly1989/animeworldtv-indexer/internal/config"
+	"github.com/easly1989/animeworldtv-indexer/internal/downloader"
 	"github.com/easly1989/animeworldtv-indexer/internal/indexer"
 	"github.com/easly1989/animeworldtv-indexer/internal/mapping"
+	"github.com/easly1989/animeworldtv-indexer/internal/qbit"
 	"github.com/easly1989/animeworldtv-indexer/internal/solver"
+	"github.com/easly1989/animeworldtv-indexer/internal/status"
 	"github.com/easly1989/animeworldtv-indexer/internal/store"
 	"github.com/easly1989/animeworldtv-indexer/internal/torznab"
 )
@@ -39,12 +42,13 @@ func main() {
 
 func run() error {
 	cfg, err := config.Load(os.Getenv)
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.SlogLevel()})))
+	logs := status.NewHub()
+	slog.SetDefault(slog.New(logs.Handler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.SlogLevel()}))))
 	if err != nil {
 		return err
 	}
 	if cfg.APIKey == "" {
-		slog.Warn("API_KEY is empty: the Torznab API is open to anyone who can reach it")
+		slog.Warn("API_KEY is empty: the Torznab, qBittorrent and status APIs are open to anyone who can reach them")
 	}
 
 	db, err := store.Open(filepath.Join(cfg.DataDir, "cache.db"))
@@ -66,8 +70,16 @@ func run() error {
 		Titles: mapping.NewTitles(mapping.AniListURL, db),
 	})
 
+	dl := downloader.New(svc, cfg.DownloadDir, nil)
+	defer dl.Close()
+
 	mux := http.NewServeMux()
+	mux.Handle("/api/v2/", qbit.New(qbit.Options{APIKey: cfg.APIKey}, dl))
 	mux.Handle("/", torznab.New(torznab.Options{APIKey: cfg.APIKey, SiteURL: cfg.BaseURL}, svc))
+	status.New(logs, status.Options{
+		APIKey: cfg.APIKey, Version: version, SiteURL: cfg.BaseURL,
+		Reachable: site.Reachable, Solver: sol.Status, Jobs: dl.List,
+	}).Register(mux)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "version": version, "site": cfg.BaseURL, "solver": sol.Status()})

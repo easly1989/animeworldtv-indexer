@@ -2,17 +2,49 @@
 
 A [Torznab](https://torznab.github.io/spec-1.3-draft/) indexer for [AnimeWorld](https://www.animeworld.ac), so Prowlarr, Sonarr and Radarr can search it. One Go binary, one container, SQLite cache.
 
-Status: keyword and TVDB-numbered TV search work end to end, with a Cloudflare fallback. RSS (latest episodes) works too. Planned next: an emulated qBittorrent API that downloads the episodes, and movies.
+Status: keyword, TVDB-numbered TV search, movie search, RSS (latest episodes), a Cloudflare fallback and grab-to-import through an emulated qBittorrent client work end to end. Planned next: a persistent download queue.
 
 ## What it does
 
-- `GET /api?t=caps` and `GET /api?t=search&q=<title>` (also `tvsearch`, `movie`) return one RSS item per episode, category `5070` (TV/Anime).
+- `GET /api?t=caps` and `GET /api?t=search&q=<title>` (also `tvsearch`) return one RSS item per episode, category `5070` (TV/Anime). `t=movie` returns films, category `2000` (see [Movies](#movies)).
 - `t=tvsearch` supports `q`, `season`, `ep` and `tvdbid` (see [TVDB numbering](#tvdb-numbering)). `t=search` accepts a trailing `S02E03` in `q` as a season/episode filter; any other `q` (including titles ending in a number) goes to the site as is.
 - Titles look like `Sousou no Frieren S02E03 [SUB ITA]`. Dubbed entries (separate series on the site) get `[ITA]`.
 - Every item has a size and date from a `HEAD` on the episode's direct MP4. Lookups are cached in SQLite and bounded; if a search runs out of time budget, the remaining sizes are estimated from the same series while the real ones finish in the background.
 - `t=tvsearch` or `t=search` without `q` (and without `tvdbid`) is the RSS feed: the latest episodes, see [RSS](#rss). It is also what Prowlarr's indexer Test uses.
-- `GET /download?ep=<token>` currently redirects to the MP4. It will become the hand-off to the download client.
+- `GET /download?ep=<token>&n=<title>` redirects to a magnet (`magnet:?xt=urn:btih:<hash>&dn=<title>&aw=<token>`). The hash is derived from the episode token; `aw` carries the token itself. Sonarr and Radarr pass that magnet to their download client.
+- `/api/v2/...` emulates the **qBittorrent Web API** (the subset Sonarr and Radarr use). Adding the magnet downloads the episode's MP4 over HTTP to `<DOWNLOAD_DIR>/<category>/<title>.mp4` and reports progress and completion like a torrent, so they import the file from the shared volume. The queue is in memory for now: a restart forgets running downloads.
 - `GET /health` returns JSON status, including a `solver` object: `configured`, `url`, `cookies_valid` (valid solved Cloudflare cookies are cached) and `expires_at`. Logs are JSON on stdout.
+- `GET /api/status` and `GET /api/logs` are the operational API the mircrewrr panel reads (see [Status and logs API](#status-and-logs-api)).
+
+### Status and logs API
+
+Both endpoints need the API key, as an `X-Api-Key` header (preferred) or the `apikey` query parameter; without it they answer `401`.
+
+`GET /api/status` returns JSON:
+
+```json
+{
+  "service": "animeworldtv-indexer", "version": "1.2.0", "uptime_seconds": 3600, "status": "ok",
+  "site": {"url": "https://www.animeworld.ac", "reachable": true},
+  "solver": {"configured": true, "url": "http://byparr:8191", "cookies_valid": false, "expires_at": null},
+  "queue": [{"hash": "40-hex", "name": "Frieren S01E03 [SUB ITA]", "category": "tv-sonarr", "state": "downloading",
+             "progress": 0.42, "size": 399962216, "downloaded": 167984130, "dlspeed": 5242880, "eta": 44,
+             "added_at": "2026-10-20T21:30:00Z"}],
+  "errors": [{"timestamp": "2026-10-20 23:31:02", "message": "file size lookup failed: ..."}]
+}
+```
+
+- `status` is `degraded` when the last request to the site failed (connection error, 5xx or a Cloudflare challenge that could not be solved), `ok` otherwise; `site.reachable` is the same fact.
+- `queue[].state` is `queued`, `downloading`, `completed`, `error` or `paused`. Completed items stay listed until Sonarr/Radarr remove them. `eta` is seconds, `0` when unknown; a failed item also carries an `error` text.
+- `errors` holds the last 20 ERROR log entries, newest last.
+
+`GET /api/logs` is a `text/event-stream`. The first event is a JSON array with the last 100 log entries, every later event an array with one new entry, and `: keepalive` comments arrive every 15 s while idle:
+
+```
+data: [{"timestamp":"2026-10-20 23:31:02","level":"INFO","logger":"app","message":"listening addr=:9698"}]
+```
+
+`timestamp` is local time, `level` is `DEBUG`, `INFO`, `WARNING` or `ERROR`. `logger` is the `logger` or `component` attribute of the record, `app` when there is none; the other attributes are appended to `message` as `key=value`. The service keeps the last 500 entries; a client that cannot keep up misses entries instead of slowing the service down.
 
 ### Cloudflare fallback
 
@@ -40,7 +72,26 @@ Add an indexer of type **Generic Torznab**:
 | URL | `http://animeworld-indexer:9698` |
 | API Path | `/api` |
 | API Key | your `API_KEY` |
-| Categories | `5070` (TV/Anime) |
+| Categories | `5070` (TV/Anime), plus `2000` (Movies) for Radarr |
+
+### Sonarr / Radarr
+
+Add a download client of type **qBittorrent**:
+
+| Field | Value |
+|---|---|
+| Host | `animeworld-indexer` (the container name) |
+| Port | `9698` |
+| Use SSL | off |
+| Username | anything, for example `animeworld` |
+| Password | your `API_KEY` |
+| Category | for example `sonarr` (files land in `/downloads/sonarr/`) |
+
+The **Test** button should pass. Sonarr/Radarr must see the downloads folder at the same path as this container, or you need a Remote Path Mapping (host `animeworld-indexer`). In the compose example the volume is `/volume1/media/downloads:/downloads` on both sides.
+
+Run the container as the user that owns the media (`user: "1000:1000"` in the example), so the imported files have the right owner. The image creates `/app/data` and `/downloads` owned by 1000:1000; a bind-mounted folder keeps the owner it has on the host, so make it writable by that user. A download that receives no data for 60 s, or answers with a web page instead of a video, fails and shows as an error in the client.
+
+If you search through Prowlarr, add the indexer to Sonarr/Radarr via Prowlarr as usual (Prowlarr passes the magnet on); no extra setup is needed. In Sonarr, leave "Remove Completed" on: once a file is imported the finished entry is removed together with the downloaded copy.
 
 ### TVDB numbering
 
@@ -59,6 +110,15 @@ Sonarr's RSS sync (every ~15 minutes) and Prowlarr's RSS call the indexer with n
 - RSS never looks up files (that is two requests per episode). If a search has already measured an episode's MP4, its `Last-Modified` is the `pubDate` and its `Content-Length` the size; otherwise the size is an estimate (median of the measured ones, else 300 MiB) and `pubDate` is when the indexer first listed the episode, never the request time.
 - A call fetches at most `MAX_SERIES` uncached series pages, newest first (and only for the requested `limit`/`offset` window). On a cold cache the feed is incomplete for a few calls and fills up; an episode whose series page is not available yet is left out rather than numbered by guess. Warm calls make no request to the site beyond the listing, once per 5 minutes.
 
+### Movies
+
+AnimeWorld lists a film as a single-episode series whose "Categoria" is `Movie` (search results carry a `Movie` badge). `t=movie` supports `q`, `imdbid` (with or without `tt`) and `tmdbid`, which Prowlarr and Radarr send because the caps declare them.
+
+- With an id, the film is found through the same Fribb list as TV (it carries IMDb and TMDB movie ids; a TMDB id is only matched against films, never against TV shows with the same number): by `q` when sent, then by the film's MAL title (from AniList) and its AnimePlanet slug. Only series mapped to that id are returned, sub and dub as separate releases. If the list does not know the id at all, unmapped films found through `q` are returned instead, without ids.
+- Without an id, `q` is a keyword search limited to the results marked `Movie`. With neither (Radarr's RSS sync) the answer is empty and the site is not asked.
+- Titles look like `Your Name. 2016 [SUB ITA]` (`[ITA]` for the dub); the year is the site's release date, left out when the page has none. Items are category `2000` and carry `imdb` (bare number), `imdbid` (`tt…`) and `tmdbid` attributes when the list ties the film to them. A film is its first episode; they download through the same `/download` link as TV episodes.
+- Like the TV releases, titles carry no quality, so Radarr sees quality "Unknown": allow it in the quality profile used for AnimeWorld.
+
 ### Configuration
 
 All environment variables are listed, with defaults, in [`.env.example`](.env.example).
@@ -71,6 +131,7 @@ go test ./...
 API_KEY=dev DATA_DIR=./data go run ./cmd/animeworldtv-indexer
 curl 'localhost:9698/api?t=search&q=frieren&apikey=dev'
 curl 'localhost:9698/api?t=tvsearch&tvdbid=424536&season=2&ep=3&apikey=dev'   # Frieren S02E03
+curl 'localhost:9698/api?t=movie&imdbid=tt5311514&apikey=dev'                # Your Name. (sub and dub)
 ```
 
 Requires Go 1.27+. The first search of a title makes a few hundred requests to the site (series pages, then file info and a `HEAD` per episode); repeat searches come from the cache.

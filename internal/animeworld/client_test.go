@@ -115,3 +115,27 @@ func TestClientRetriesOnce(t *testing.T) {
 		t.Fatalf("u=%q err=%v calls=%s", u, err, strconv.Itoa(calls))
 	}
 }
+
+func TestClientReachable(t *testing.T) {
+	down := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if down {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Write([]byte(`{"grabber":"x"}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, srv.Client())
+	c.retryDelay = time.Millisecond
+	if !c.Reachable() {
+		t.Fatal("a client that made no request is reachable")
+	}
+	if _, err := c.FileURL(context.Background(), "t"); err == nil || c.Reachable() {
+		t.Fatalf("5xx must mark the site unreachable: err=%v reachable=%v", err, c.Reachable())
+	}
+	down = false
+	if _, err := c.FileURL(context.Background(), "t"); err != nil || !c.Reachable() {
+		t.Fatalf("a good response must clear it: err=%v reachable=%v", err, c.Reachable())
+	}
+}
