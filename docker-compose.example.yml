@@ -1,0 +1,12 @@
+# Example: add this service to the existing "arr" stack next to Prowlarr (9696)
+# and mircrewrr (9697). Prowlarr then reaches it at http://animeworld-indexer:9698.
+services:
+  animeworld-indexer:
+    image: ghcr.io/easly1989/animeworldtv-indexer:latest
+    container_name: animeworld-indexer
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "9698:9698"
+    volumes:
+      - ./animeworld-indexer/data:/app/data
