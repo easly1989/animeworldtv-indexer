@@ -43,6 +43,7 @@ func (s *site) serve(token, content string) {
 
 func newManager(t *testing.T, s *site) *Manager {
 	m := New(s, t.TempDir(), nil)
+	m.backoff = 5 * time.Millisecond
 	t.Cleanup(m.Close)
 	return m
 }

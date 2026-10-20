@@ -68,7 +68,7 @@ func run() error {
 		Titles: mapping.NewTitles(mapping.AniListURL, db),
 	})
 
-	dl := downloader.New(svc, cfg.DownloadDir, nil)
+	dl := downloader.New(svc, cfg.DownloadDir, nil, downloader.WithStore(db), downloader.WithMaxDownloads(cfg.MaxDownloads))
 	defer dl.Close()
 
 	mux := http.NewServeMux()
