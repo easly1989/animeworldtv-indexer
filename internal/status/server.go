@@ -151,6 +151,10 @@ func item(j downloader.Job) queueItem {
 		q.Error = j.Err
 	case downloader.Downloading:
 		q.State = "downloading"
+	case downloader.Queued:
+		q.State = "queued"
+	case downloader.Paused:
+		q.State = "paused"
 	default:
 		q.State = "queued"
 		if j.Speed > 0 {

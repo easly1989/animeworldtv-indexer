@@ -86,6 +86,8 @@ func TestStatusPayload(t *testing.T) {
 		{Hash: "a", Name: "Frieren S01E03 [SUB ITA]", Category: "tv-sonarr", State: downloader.Downloading, Size: 400, Done: 100, Speed: 50, Added: added},
 		{Hash: "c", Name: "Broken", State: downloader.Failed, Err: "boom", Added: added.Add(2 * time.Minute)},
 		{Hash: "d", Name: "Future", State: downloader.State(99), Added: added.Add(3 * time.Minute)},
+		{Hash: "e", Name: "Held", State: downloader.Paused, Speed: 0, Added: added.Add(4 * time.Minute)},
+		{Hash: "f", Name: "Waiting", State: downloader.Queued, Added: added.Add(5 * time.Minute)},
 	}
 	_, hub, srv := fixture(t, Options{
 		Version: "1.2.0", SiteURL: "https://www.animeworld.ac",
@@ -114,7 +116,7 @@ func TestStatusPayload(t *testing.T) {
 	if !p.Solver.Configured || p.Solver.URL != "http://byparr:8191" || !p.Solver.CookiesValid || p.Solver.ExpiresAt == nil || !p.Solver.ExpiresAt.Equal(exp) {
 		t.Errorf("solver: %+v", p.Solver)
 	}
-	if len(p.Queue) != 4 || p.Queue[0].Hash != "a" { // oldest first
+	if len(p.Queue) != 6 || p.Queue[0].Hash != "a" { // oldest first
 		t.Fatalf("queue: %+v", p.Queue)
 	}
 	q := p.Queue[0]
@@ -122,7 +124,8 @@ func TestStatusPayload(t *testing.T) {
 		q.AddedAt != "2026-10-20T21:30:00Z" || q.Name != "Frieren S01E03 [SUB ITA]" || q.Category != "tv-sonarr" {
 		t.Errorf("downloading item: %+v", q)
 	}
-	if p.Queue[1].State != "completed" || p.Queue[1].Progress != 1 || p.Queue[2].State != "error" || p.Queue[3].State != "queued" {
+	if p.Queue[1].State != "completed" || p.Queue[1].Progress != 1 || p.Queue[2].State != "error" || p.Queue[3].State != "queued" ||
+		p.Queue[4].State != "paused" || p.Queue[5].State != "queued" {
 		t.Errorf("states: %+v", p.Queue)
 	}
 	if len(p.Errors) != 1 || p.Errors[0].Message != "file size lookup failed err=x" || len(p.Errors[0].Timestamp) != len(timeLayout) {
