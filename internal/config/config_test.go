@@ -13,7 +13,7 @@ func TestDefaults(t *testing.T) {
 	if c.Port != 9698 || c.Host != "0.0.0.0" || c.DataDir != "/app/data" || c.BaseURL != "https://www.animeworld.ac" ||
 		c.LogLevel != "INFO" || c.MaxSeries != 8 || c.Concurrency != 4 || c.SearchBudget != 40*time.Second ||
 		c.MappingRefresh != 24*time.Hour || c.MappingURL != "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-full.json" ||
-		c.DownloadDir != "/downloads" {
+		c.DownloadDir != "/downloads" || c.OriginRPS != 1 || c.OriginBurst != 3 || c.SizeLookups != 10 {
 		t.Errorf("unexpected defaults: %+v", c)
 	}
 }
@@ -22,19 +22,22 @@ func TestOverrides(t *testing.T) {
 	env := map[string]string{
 		"API_KEY": "k", "PROXY_PORT": "1234", "DATA_DIR": "/d", "ANIMEWORLD_URL": "https://x.test/",
 		"FLARESOLVERR_URL": "http://byparr:8191", "LOG_LEVEL": "debug", "SEARCH_BUDGET": "5s",
+		"ORIGIN_RPS": "0.5", "ORIGIN_BURST": "1", "SIZE_LOOKUPS": "0",
 	}
 	c, err := Load(func(k string) string { return env[k] })
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.APIKey != "k" || c.Port != 1234 || c.DataDir != "/d" || c.BaseURL != "https://x.test" ||
-		c.FlareSolverrURL != "http://byparr:8191" || c.LogLevel != "DEBUG" || c.SearchBudget != 5*time.Second {
+		c.FlareSolverrURL != "http://byparr:8191" || c.LogLevel != "DEBUG" || c.SearchBudget != 5*time.Second ||
+		c.OriginRPS != 0.5 || c.OriginBurst != 1 || c.SizeLookups != 0 {
 		t.Errorf("overrides not applied: %+v", c)
 	}
 }
 
 func TestBadValuesAreErrors(t *testing.T) {
-	for k, v := range map[string]string{"PROXY_PORT": "abc", "CONCURRENCY": "0", "SEARCH_BUDGET": "soon", "MAX_SERIES": "-1", "MAPPING_REFRESH": "daily"} {
+	for k, v := range map[string]string{"PROXY_PORT": "abc", "CONCURRENCY": "0", "SEARCH_BUDGET": "soon", "MAX_SERIES": "-1", "MAPPING_REFRESH": "daily",
+		"ORIGIN_RPS": "0", "ORIGIN_BURST": "0", "SIZE_LOOKUPS": "-1"} {
 		if _, err := Load(func(key string) string {
 			if key == k {
 				return v

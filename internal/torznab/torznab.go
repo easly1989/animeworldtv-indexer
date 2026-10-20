@@ -109,7 +109,11 @@ func (h *handler) search(w http.ResponseWriter, r *http.Request) {
 		default:
 			rels, err = h.b.Search(r.Context(), strings.TrimSpace(q.Get("q")), offset, limit)
 		}
-		if errors.Is(err, animeworld.ErrBlocked) { // Cloudflare in the way: an empty feed, not an error
+		switch {
+		case errors.Is(err, animeworld.ErrOriginBlocked): // the client logged the ban once; every search would repeat it
+			slog.Debug("origin blocked, returning no results", "q", q.Get("q"), "err", err)
+			rels, err = nil, nil
+		case errors.Is(err, animeworld.ErrBlocked): // Cloudflare in the way: an empty feed, not an error
 			slog.Error("search blocked by Cloudflare, returning no results", "q", q.Get("q"), "err", err)
 			rels, err = nil, nil
 		}

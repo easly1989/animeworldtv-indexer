@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -58,6 +57,7 @@ func run() error {
 	defer db.Close()
 
 	site := animeworld.New(cfg.BaseURL, nil)
+	site.SetRate(cfg.OriginRPS, cfg.OriginBurst)
 	var sol *solver.Solver
 	if cfg.FlareSolverrURL != "" {
 		sol = solver.New(cfg.FlareSolverrURL, cfg.BaseURL, solverTTL, db)
@@ -66,7 +66,7 @@ func run() error {
 	maps := mapping.NewSource(cfg.MappingURL, db, cfg.MappingRefresh)
 	maps.Index(context.Background()) // starts the first download in the background
 	svc := indexer.New(site, db, indexer.Options{
-		MaxSeries: cfg.MaxSeries, Concurrency: cfg.Concurrency, Budget: cfg.SearchBudget, Mapping: maps,
+		MaxSeries: cfg.MaxSeries, Concurrency: cfg.Concurrency, Budget: cfg.SearchBudget, SizeLookups: cfg.SizeLookups, Mapping: maps,
 		Titles: mapping.NewTitles(mapping.AniListURL, db),
 	})
 
@@ -78,12 +78,8 @@ func run() error {
 	mux.Handle("/", torznab.New(torznab.Options{APIKey: cfg.APIKey, SiteURL: cfg.BaseURL}, svc))
 	status.New(logs, status.Options{
 		APIKey: cfg.APIKey, Version: version, SiteURL: cfg.BaseURL,
-		Reachable: site.Reachable, Solver: sol.Status, Jobs: dl.List,
+		Reachable: site.Reachable, Reason: site.Blocked, Solver: sol.Status, Jobs: dl.List,
 	}).Register(mux)
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "version": version, "site": cfg.BaseURL, "solver": sol.Status()})
-	})
 
 	srv := &http.Server{
 		Addr:              net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),

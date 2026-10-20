@@ -81,10 +81,26 @@ func TestChallengeWithoutSolver(t *testing.T) {
 	}
 }
 
-func TestPlain403IsNotAChallenge(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) }))
-	defer srv.Close()
-	if _, err := New(srv.URL, srv.Client()).FileURL(context.Background(), "t"); err == nil || errors.Is(err, ErrBlocked) {
-		t.Fatalf("err=%v, want a plain status error", err)
+// The "Just a moment" page is a challenge even without the cf-mitigated header.
+func TestChallengePageWithoutHeaderStillGoesToSolver(t *testing.T) {
+	var challenges atomic.Int32
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if c, err := r.Cookie("cf_clearance"); err != nil || c.Value != "ok" {
+			challenges.Add(1)
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`<title>Just a moment...</title><script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script>`))
+			return
+		}
+		w.Write([]byte(`{"grabber":"http://files/x.mp4"}`))
+	}))
+	defer site.Close()
+	sol, solves := fakeSolver(t, site)
+	c := New(site.URL, site.Client())
+	c.UseSolver(solver.New(sol.URL, site.URL, time.Hour, nil))
+	if u, err := c.FileURL(context.Background(), "t"); err != nil || u != "http://files/x.mp4" {
+		t.Fatalf("u=%q err=%v", u, err)
+	}
+	if solves.Load() != 1 || challenges.Load() != 1 || c.Blocked() != "" {
+		t.Errorf("solver calls=%d challenges=%d blocked=%q", solves.Load(), challenges.Load(), c.Blocked())
 	}
 }
