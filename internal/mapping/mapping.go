@@ -134,6 +134,9 @@ func NewIndex(entries []Entry) *Index {
 	return idx
 }
 
+// Empty reports whether the list is not loaded (yet): nothing resolves.
+func (i *Index) Empty() bool { return i == nil || len(i.byMAL)+len(i.byAniList) == 0 }
+
 func (i *Index) ByMAL(id int) (Entry, bool) {
 	if i == nil {
 		return Entry{}, false

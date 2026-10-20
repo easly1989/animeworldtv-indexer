@@ -44,24 +44,25 @@ func TestEmptyTVSearchReturnsTheLatestEpisodesNewestFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// u3 and u1 have a file date (Mar 4, Mar 3); u2 and u4 were first listed on Mar 10 and 9.
+	// The site's order, whatever the dates: they come from different sources
+	// (file date, first sighting) and sorting by them scrambles a warming feed.
 	want := []string{
-		"Frieren: Beyond Journey's End S02E04 [ITA]",
-		"Foo S02E05 [SUB ITA]",     // not in the mapping: season from the title
-		"Re:Zero S02E25 [SUB ITA]", // AnimeWorld episode 12 of the second cour: TVDB 12+13
 		"Frieren: Beyond Journey's End S02E04 [SUB ITA]",
+		"Frieren: Beyond Journey's End S02E04 [ITA]",
+		"Re:Zero S02E25 [SUB ITA]", // AnimeWorld episode 12 of the second cour: TVDB 12+13
+		"Foo S02E05 [SUB ITA]",     // not in the mapping: season from the title
 	}
 	if got := titles(rels); !reflect.DeepEqual(got, want) {
 		t.Fatalf("got  %q\nwant %q", got, want)
 	}
-	if !rels[2].Published.Equal(day(4)) || !rels[3].Published.Equal(day(3)) || rels[2].Size != 700<<20 || rels[2].Estimated {
-		t.Errorf("a measured file keeps its date and size: %+v / %+v", rels[2], rels[3])
+	if !rels[2].Published.Equal(day(4)) || !rels[0].Published.Equal(day(3)) || rels[2].Size != 700<<20 || rels[2].Estimated {
+		t.Errorf("a measured file keeps its date and size: %+v / %+v", rels[2], rels[0])
 	}
-	if !rels[0].Estimated || rels[0].Size <= 0 || !rels[0].Published.Equal(day(10)) {
-		t.Errorf("an unmeasured episode gets an estimated size and the time it was first seen: %+v", rels[0])
+	if !rels[1].Estimated || rels[1].Size <= 0 || !rels[1].Published.Equal(day(10)) {
+		t.Errorf("an unmeasured episode gets an estimated size and the time it was first seen: %+v", rels[1])
 	}
-	if rels[2].TVDBID != 305089 || rels[2].Season != 2 || rels[2].Episode != 25 || rels[1].TVDBID != 0 {
-		t.Errorf("numbering attrs: %+v / %+v", rels[2], rels[1])
+	if rels[2].TVDBID != 305089 || rels[2].Season != 2 || rels[2].Episode != 25 || rels[3].TVDBID != 0 {
+		t.Errorf("numbering attrs: %+v / %+v", rels[2], rels[3])
 	}
 
 	// The plain search without a query is the same feed.
@@ -123,6 +124,44 @@ func TestLatestFiltersBySeasonAndEpisodeWhenAsked(t *testing.T) {
 	rels, err := svc.SearchTV(context.Background(), TVQuery{Season: 2, Ep: 25}, 0, 100)
 	if err != nil || len(rels) != 1 || rels[0].Title != "Re:Zero S02E25 [SUB ITA]" {
 		t.Fatalf("err=%v got %q", err, titles(rels))
+	}
+}
+
+func TestLatestIsEmptyUntilTheMappingLoads(t *testing.T) {
+	svc, site := latestService(t)
+	svc.opt.Mapping = staticMapper{nil} // the list has not been downloaded yet
+	rels, err := svc.SearchTV(context.Background(), TVQuery{}, 0, 100)
+	if err != nil || len(rels) != 0 {
+		t.Fatalf("err=%v got %q, want an empty feed rather than guessed numbers", err, titles(rels))
+	}
+	if site.count("updated")+site.count("series") != 0 {
+		t.Errorf("the site was asked while the feed could not be numbered")
+	}
+}
+
+func TestLatestSkipsFailingSeriesPagesForAWhile(t *testing.T) {
+	site := &fakeSite{seriesFail: func(path string) bool { return path < "/play/s08" }} // s00..s07 always fail
+	for i := 0; i < 12; i++ {
+		site.updates = append(site.updates, animeworld.Update{Path: fmt.Sprintf("/play/s%02d.x", i), Num: "1", Token: fmt.Sprintf("t%d", i)})
+	}
+	svc := newTVService(t, site) // MaxSeries 8
+	if _, err := svc.SearchTV(context.Background(), TVQuery{}, 0, 100); err != nil {
+		t.Fatal(err)
+	}
+	rels, err := svc.SearchTV(context.Background(), TVQuery{}, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rels) != 4 || site.count("series") != 12 {
+		t.Errorf("releases=%d series fetches=%d, want the 4 healthy series and no refetch of the failing 8", len(rels), site.count("series"))
+	}
+}
+
+func TestLatestFilterSeesTheWholeListing(t *testing.T) {
+	svc, _ := latestService(t)
+	rels, err := svc.SearchTV(context.Background(), TVQuery{Season: 2, Ep: 25}, 0, 1)
+	if err != nil || len(rels) != 1 || rels[0].Title != "Re:Zero S02E25 [SUB ITA]" {
+		t.Fatalf("err=%v got %q, want the third listed episode within limit 1", err, titles(rels))
 	}
 }
 

@@ -134,6 +134,9 @@ func ParseUpdated(r io.Reader) ([]Update, error) {
 		seen[tok] = true
 		ups = append(ups, Update{Path: path, Title: CleanTitle(a.Text()), Dub: IsDub(path), Num: lbl[1], Token: tok})
 	})
+	if len(ups) == 0 { // the listing is never empty: the item markup changed
+		return nil, errors.New("no episode in .film-list: markup changed")
+	}
 	return ups, nil
 }
 

@@ -22,9 +22,10 @@ import (
 
 const (
 	searchTTL  = 10 * time.Minute
-	seriesTTL  = time.Hour       // airing series gain episodes
-	latestTTL  = 5 * time.Minute // the /updated listing; RSS polls every ~15 min
-	idsTTL     = 24 * time.Hour  // a series' MAL/AniList ids are all the latest feed reads from its page
+	seriesTTL  = time.Hour           // airing series gain episodes
+	latestTTL  = 5 * time.Minute     // the /updated listing; RSS polls every ~15 min
+	idsTTL     = 30 * 24 * time.Hour // a series' MAL/AniList ids are all the latest feed reads from its page; they do not change
+	failTTL    = 20 * time.Minute    // how long the latest feed skips a series page that failed
 	metaTTL    = 30 * 24 * time.Hour
 	defaultMiB = 300 // size guess when nothing at all could be measured
 )
@@ -208,14 +209,20 @@ func newRelease(nb numbered, e animeworld.Episode, season, ep int) (Release, boo
 // episode. Sizes never trigger a lookup (that is two requests per episode): a
 // size already measured by a search is used, the rest are estimated.
 func (s *Service) latest(ctx context.Context, season, ep, offset, limit int) ([]Release, error) {
+	idx := s.mapIndex(ctx)
+	if s.opt.Mapping != nil && idx.Empty() {
+		// Unmapped, a second cour's episode 12 would go out as S02E12 instead of
+		// S02E25 and Sonarr could grab the wrong one; the list loads in the background.
+		slog.Info("TVDB mapping not loaded yet, serving an empty latest feed")
+		return nil, nil
+	}
 	ups, err := s.updates(ctx)
 	if err != nil {
 		return nil, err
 	}
-	offset = min(offset, len(ups))
-	ups = ups[offset:]
-	if limit > 0 && limit < len(ups) {
-		ups = ups[:limit]
+	filtered := season != 0 || ep != 0
+	if !filtered { // with a filter the window applies to the matches, below
+		ups = window(ups, offset, limit)
 	}
 
 	var hits []animeworld.Hit
@@ -224,7 +231,6 @@ func (s *Service) latest(ctx context.Context, season, ep, offset, limit int) ([]
 			hits = append(hits, animeworld.Hit{Path: u.Path})
 		}
 	}
-	idx := s.mapIndex(ctx)
 	byPath := map[string]numbered{}
 	for _, se := range s.seriesAllTTL(ctx, hits, idsTTL, s.opt.MaxSeries) {
 		byPath[se.Path] = numbered{se, idx.Resolve(se.MALID, se.AniListID, se.Title, se.Path)}
@@ -246,8 +252,18 @@ func (s *Service) latest(ctx context.Context, season, ep, offset, limit int) ([]
 		}
 	}
 	estimate(rels)
-	sort.SliceStable(rels, func(i, j int) bool { return rels[i].Published.After(rels[j].Published) })
-	return rels, nil
+	if filtered {
+		rels = window(rels, offset, limit)
+	}
+	return rels, nil // in listing order, which is newest first
+}
+
+func window[T any](l []T, offset, limit int) []T {
+	l = l[min(offset, len(l)):]
+	if limit > 0 && limit < len(l) {
+		l = l[:limit]
+	}
+	return l
 }
 
 func (s *Service) updates(ctx context.Context) ([]animeworld.Update, error) {
@@ -464,7 +480,8 @@ func (s *Service) seriesAllTTL(ctx context.Context, hits []animeworld.Hit, ttl t
 			out[i] = &se
 			continue
 		}
-		if maxFetch > 0 && fetching == maxFetch {
+		var failed bool // capped callers (the latest feed) skip a page that failed lately, so it cannot eat the cap
+		if maxFetch > 0 && (fetching == maxFetch || s.cache.Get("seriesfail:"+h.Path, failTTL, &failed)) {
 			continue
 		}
 		fetching++
@@ -476,6 +493,9 @@ func (s *Service) seriesAllTTL(ctx context.Context, hits []animeworld.Hit, ttl t
 			<-s.sem
 			if err != nil {
 				slog.Warn("series fetch failed", "path", h.Path, "err", err)
+				if !errors.Is(err, animeworld.ErrOriginBlocked) && ctx.Err() == nil { // a ban pauses everything anyway
+					s.put("seriesfail:"+h.Path, true)
+				}
 				return
 			}
 			s.put(key, se)

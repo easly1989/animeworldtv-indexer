@@ -104,6 +104,11 @@ func TestParseUpdatedSkipsEntriesWithoutANumberedEpisode(t *testing.T) {
 	if _, err := ParseUpdated(strings.NewReader("<html>blocked</html>")); err == nil {
 		t.Fatal("expected an error when the film list is missing")
 	}
+	// The list is there but its items changed shape: an error, not an empty feed.
+	drift := `<div class="film-list"><div class="entry"><a href="/play/a.x1/t1" class="title">A</a></div></div>`
+	if _, err := ParseUpdated(strings.NewReader(drift)); err == nil {
+		t.Fatal("expected an error when no item parses")
+	}
 }
 
 func TestParseSeries(t *testing.T) {
