@@ -2,7 +2,7 @@
 
 A [Torznab](https://torznab.github.io/spec-1.3-draft/) indexer for [AnimeWorld](https://www.animeworld.ac), so Prowlarr, Sonarr and Radarr can search it. One Go binary, one container, SQLite cache.
 
-Status: keyword, TVDB-numbered TV search and movie search, a Cloudflare fallback and grab-to-import through an emulated qBittorrent client work end to end. Planned next: a persistent download queue and RSS.
+Status: keyword, TVDB-numbered TV search and movie search, a Cloudflare fallback and grab-to-import through an emulated qBittorrent client work end to end. The download queue survives restarts. Planned next: RSS.
 
 ## What it does
 
@@ -12,7 +12,7 @@ Status: keyword, TVDB-numbered TV search and movie search, a Cloudflare fallback
 - Every item has a size and date from a `HEAD` on the episode's direct MP4. Lookups are cached in SQLite and bounded; if a search runs out of time budget, the remaining sizes are estimated from the same series while the real ones finish in the background.
 - An empty `q` returns the site's latest updates, which is what Prowlarr's indexer Test uses.
 - `GET /download?ep=<token>&n=<title>` redirects to a magnet (`magnet:?xt=urn:btih:<hash>&dn=<title>&aw=<token>`). The hash is derived from the episode token; `aw` carries the token itself. Sonarr and Radarr pass that magnet to their download client.
-- `/api/v2/...` emulates the **qBittorrent Web API** (the subset Sonarr and Radarr use). Adding the magnet downloads the episode's MP4 over HTTP to `<DOWNLOAD_DIR>/<category>/<title>.mp4` and reports progress and completion like a torrent, so they import the file from the shared volume. The queue is in memory for now: a restart forgets running downloads.
+- `/api/v2/...` emulates the **qBittorrent Web API** (the subset Sonarr and Radarr use). Adding the magnet downloads the episode's MP4 over HTTP to `<DOWNLOAD_DIR>/<category>/<title>.mp4` and reports progress and completion like a torrent, so they import the file from the shared volume. See [Download queue](#download-queue) for parallelism, retries and restarts.
 - `GET /health` returns JSON status, including a `solver` object: `configured`, `url`, `cookies_valid` (valid solved Cloudflare cookies are cached) and `expires_at`. Logs are JSON on stdout.
 
 ### Cloudflare fallback
@@ -61,6 +61,17 @@ The **Test** button should pass. Sonarr/Radarr must see the downloads folder at 
 Run the container as the user that owns the media (`user: "1000:1000"` in the example), so the imported files have the right owner. The image creates `/app/data` and `/downloads` owned by 1000:1000; a bind-mounted folder keeps the owner it has on the host, so make it writable by that user. A download that receives no data for 60 s, or answers with a web page instead of a video, fails and shows as an error in the client.
 
 If you search through Prowlarr, add the indexer to Sonarr/Radarr via Prowlarr as usual (Prowlarr passes the magnet on); no extra setup is needed. In Sonarr, leave "Remove Completed" on: once a file is imported the finished entry is removed together with the downloaded copy.
+
+### Download queue
+
+Jobs and categories are kept in the SQLite database (`DATA_DIR/cache.db`), so a restart or crash loses nothing.
+
+- **Parallelism.** `MAX_DOWNLOADS` (default `2`) episodes download at once; a season grab's other episodes show as `queuedDL` and start as slots free up.
+- **Restart.** Unfinished downloads (running or queued) start again by themselves and continue the `.part` file with a `Range` request; if the server does not answer `206` the file is downloaded again from the start. Finished jobs whose file is still in the downloads folder stay as `pausedUP` until the client deletes them; a finished job whose file is gone is dropped. `.part` files that no job owns are deleted at startup. Categories are restored too, so `save_path` is right before the first new add.
+- **Retries.** A failed attempt (5xx, timeout, stall, a Cloudflare page instead of a video, a short body) is retried up to 3 times in all, 2 s then 4 s apart, each time asking the site for a fresh file URL and resuming the partial file. A 404/410 is not retried. Only after that is the job `error`, which Sonarr/Radarr show as a warning until you remove it; adding the same episode again retries it.
+- **Stopped adds.** `paused=true` / `stopped=true` on `torrents/add` adds the job as `pausedDL` without downloading. `torrents/pause` and `stop` pause a job (the partial file stays), `resume` and `start` continue it.
+- **Delete.** `torrents/delete` stops the job and removes its row and partial file; with `deleteFiles=true` it also removes the finished file.
+- **One episode, one category.** An episode is tracked once, whichever client grabbed it. If Sonarr and Radarr (or two categories) ask for the same episode while it is still in the queue, the second add is answered `Fails.` and logged; it works again once the first job is deleted. Set `Remove Completed` as described above so finished entries do not linger.
 
 ### TVDB numbering
 
