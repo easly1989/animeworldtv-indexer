@@ -60,9 +60,13 @@ func TestClientSearch(t *testing.T) {
 	if err != nil || len(hits) != 5 {
 		t.Fatalf("hits=%d err=%v", len(hits), err)
 	}
-	// An empty query must not hit /search (the site redirects it away).
-	if hits, err = c.Search(context.Background(), ""); err != nil || len(hits) != 5 {
-		t.Fatalf("latest: hits=%d err=%v", len(hits), err)
+}
+
+func TestClientUpdated(t *testing.T) {
+	c, _ := serve(t, map[string]string{"search": "testdata/updated.html"})
+	ups, err := c.Updated(context.Background())
+	if err != nil || len(ups) != 40 {
+		t.Fatalf("updates=%d err=%v", len(ups), err)
 	}
 }
 

@@ -55,6 +55,62 @@ func TestParseSearchNoList(t *testing.T) {
 	}
 }
 
+func TestParseUpdated(t *testing.T) {
+	ups, err := ParseUpdated(fixture(t, "updated.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ups) != 40 {
+		t.Fatalf("want 40 updates, got %d", len(ups))
+	}
+	if want := (Update{Path: "/play/battle-spirits-re-zekkai-no-kuu.G1u8d", Title: "Battle Spirits [Re] Zekkai No Ku", Num: "3", Token: "2PPEH7"}); ups[0] != want {
+		t.Errorf("first: got %+v, want %+v", ups[0], want)
+	}
+	// A dubbed and a subbed entry of the same series and episode are two updates.
+	if want := (Update{Path: "/play/cyberpunk-edgerunners-2-ita.Dg7-P", Title: "Cyberpunk: Edgerunners 2", Dub: true, Num: "10", Token: "fIiRSa"}); ups[2] != want {
+		t.Errorf("dub: got %+v, want %+v", ups[2], want)
+	}
+	if ups[3].Dub || ups[3].Path != "/play/cyberpunk-edgerunners-2.O8RTe" || ups[3].Token != "-6p-gY" {
+		t.Errorf("sub: got %+v", ups[3])
+	}
+	dubs := 0
+	for _, u := range ups {
+		if u.Num == "" || u.Token == "" || u.Path == "" {
+			t.Errorf("incomplete update: %+v", u)
+		}
+		if u.Dub {
+			dubs++
+		}
+	}
+	if dubs != 5 {
+		t.Errorf("want 5 dubbed updates, got %d", dubs)
+	}
+}
+
+func TestParseUpdatedSkipsEntriesWithoutANumberedEpisode(t *testing.T) {
+	html := `<div class="film-list">
+	<div class="item"><a href="/play/a.x1/t1" class="name">A</a><div class="status"><div class="ep"> Ep 12.5 </div></div></div>
+	<div class="item"><a href="/play/m.x2/t2" class="name">Movie</a><div class="status"><div class="ona">ONA</div></div></div>
+	<div class="item"><a href="/play/s.x3/t3" class="name">Special</a><div class="status"><div class="ep"> Ep Speciale </div></div></div>
+	<div class="item"><a href="/play/a.x1/t1" class="name">A</a><div class="status"><div class="ep"> Ep 12.5 </div></div></div>
+	<div class="item"><a href="/play/b.x4" class="name">B</a><div class="status"><div class="ep"> Ep 1 </div></div></div></div>`
+	ups, err := ParseUpdated(strings.NewReader(html))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ups) != 1 || ups[0].Num != "12.5" || ups[0].Token != "t1" {
+		t.Fatalf("unexpected updates: %+v", ups)
+	}
+	if _, err := ParseUpdated(strings.NewReader("<html>blocked</html>")); err == nil {
+		t.Fatal("expected an error when the film list is missing")
+	}
+	// The list is there but its items changed shape: an error, not an empty feed.
+	drift := `<div class="film-list"><div class="entry"><a href="/play/a.x1/t1" class="title">A</a></div></div>`
+	if _, err := ParseUpdated(strings.NewReader(drift)); err == nil {
+		t.Fatal("expected an error when no item parses")
+	}
+}
+
 func TestParseSeries(t *testing.T) {
 	s, err := ParseSeries(fixture(t, "series_frieren.html"))
 	if err != nil {

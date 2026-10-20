@@ -2,7 +2,7 @@
 
 A [Torznab](https://torznab.github.io/spec-1.3-draft/) indexer for [AnimeWorld](https://www.animeworld.ac), so Prowlarr, Sonarr and Radarr can search it. One Go binary, one container, SQLite cache.
 
-Status: keyword, TVDB-numbered TV search and movie search, a Cloudflare fallback and grab-to-import through an emulated qBittorrent client work end to end. The download queue survives restarts. Planned next: RSS.
+Status: keyword, TVDB-numbered TV search, movie search, RSS (latest episodes), a Cloudflare fallback and grab-to-import through an emulated qBittorrent client work end to end. The download queue survives restarts.
 
 ## What it does
 
@@ -10,7 +10,7 @@ Status: keyword, TVDB-numbered TV search and movie search, a Cloudflare fallback
 - `t=tvsearch` supports `q`, `season`, `ep` and `tvdbid` (see [TVDB numbering](#tvdb-numbering)). `t=search` accepts a trailing `S02E03` in `q` as a season/episode filter; any other `q` (including titles ending in a number) goes to the site as is.
 - Titles look like `Sousou no Frieren S02E03 [SUB ITA]`. Dubbed entries (separate series on the site) get `[ITA]`.
 - Every item has a size and date. Real ones come from a `HEAD` on the episode's direct MP4, but only for the newest `SIZE_LOOKUPS` (10) episodes of a response that are not cached yet; the others are estimated from the same series (else a default), and later searches measure the next ones. Real sizes are cached in SQLite for 30 days; if a search runs out of time budget, the remaining lookups finish in the background.
-- An empty `q` returns the site's latest updates, which is what Prowlarr's indexer Test uses.
+- `t=tvsearch` or `t=search` without `q` (and without `tvdbid`) is the RSS feed: the latest episodes, see [RSS](#rss). It is also what Prowlarr's indexer Test uses.
 - `GET /download?ep=<token>&n=<title>` redirects to a magnet (`magnet:?xt=urn:btih:<hash>&dn=<title>&aw=<token>`). The hash is derived from the episode token; `aw` carries the token itself. Sonarr and Radarr pass that magnet to their download client.
 - `/api/v2/...` emulates the **qBittorrent Web API** (the subset Sonarr and Radarr use). Adding the magnet downloads the episode's MP4 over HTTP to `<DOWNLOAD_DIR>/<category>/<title>.mp4` and reports progress and completion like a torrent, so they import the file from the shared volume. See [Download queue](#download-queue) for parallelism, retries and restarts.
 - `GET /health` returns JSON status, including a `solver` object: `configured`, `url`, `cookies_valid` (valid solved Cloudflare cookies are cached) and `expires_at`. Logs are JSON on stdout.
@@ -123,12 +123,20 @@ AnimeWorld lists every season as its own series, numbered from episode 1 ("Frier
 - A series missing from the list falls back to a heuristic: a trailing season number in the title or slug (`Frieren 2`, `Season 2`, `2nd Season`, `Overlord III`, `-2-ita`) gives that season, otherwise season 1. When the title is given, such unmapped series are returned for a TVDB search too; their season marker is stripped from the title (`Frieren 2` is released as `Frieren S02E03`) so Sonarr matches the show.
 - Releases always use `SxxEyy` titles, which Sonarr parses for standard and Anime-type series. Only an episode with no integer number (such as `12.5`) keeps the site's own number: `Title - 12.5 [SUB ITA]`. Items also carry `tvdbid`, `season` and `episode` Torznab attributes when known.
 
+### RSS
+
+Sonarr's RSS sync (every ~15 minutes) and Prowlarr's RSS call the indexer with no `q`. The answer is the site's `/updated` listing, one item per listed episode (a sub and a dub of the same episode are two items), in the site's order (newest first), titled and numbered like a TV search (`Title S02E03 [SUB ITA]`, plus `tvdbid`/`season`/`episode` attributes). `season` and `ep`, if sent, filter that list before `offset`/`limit` apply. Until the TVDB list has been downloaded once the feed is empty: unmapped numbers could make Sonarr grab the wrong episode.
+
+- The listing is cached for 5 minutes. It names the episode, so the series' other episodes are not read; the series page is only fetched for its MAL/AniList ids, which do not change, and cached for 30 days.
+- RSS never looks up files (that is two requests per episode). If a search has already measured an episode's MP4, its `Last-Modified` is the `pubDate` and its `Content-Length` the size; otherwise the size is an estimate (median of the measured ones, else 300 MiB) and `pubDate` is when the indexer first listed the episode, never the request time.
+- A call fetches at most `MAX_SERIES` uncached series pages, newest first (and only for the requested `limit`/`offset` window); a page that failed is skipped for 20 minutes, so it cannot use up that allowance on every call. On a cold cache the feed is incomplete for a few calls and fills up; an episode whose series page is not available yet is left out rather than numbered by guess. Warm calls make no request to the site beyond the listing, once per 5 minutes.
+
 ### Movies
 
 AnimeWorld lists a film as a single-episode series whose "Categoria" is `Movie` (search results carry a `Movie` badge). `t=movie` supports `q`, `imdbid` (with or without `tt`) and `tmdbid`, which Prowlarr and Radarr send because the caps declare them.
 
 - With an id, the film is found through the same Fribb list as TV (it carries IMDb and TMDB movie ids; a TMDB id is only matched against films, never against TV shows with the same number): by `q` when sent, then by the film's MAL title (from AniList) and its AnimePlanet slug. Only series mapped to that id are returned, sub and dub as separate releases. If the list does not know the id at all, unmapped films found through `q` are returned instead, without ids.
-- Without an id, `q` is a keyword search limited to the results marked `Movie`.
+- Without an id, `q` is a keyword search limited to the results marked `Movie`. With neither (Radarr's RSS sync) the answer is empty and the site is not asked.
 - Titles look like `Your Name. 2016 [SUB ITA]` (`[ITA]` for the dub); the year is the site's release date, left out when the page has none. Items are category `2000` and carry `imdb` (bare number), `imdbid` (`tt…`) and `tmdbid` attributes when the list ties the film to them. A film is its first episode; they download through the same `/download` link as TV episodes.
 - Like the TV releases, titles carry no quality, so Radarr sees quality "Unknown": allow it in the quality profile used for AnimeWorld.
 

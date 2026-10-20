@@ -93,6 +93,53 @@ func ParseSearch(r io.Reader) ([]Hit, error) {
 	return hits, nil
 }
 
+// Update is one entry of the /updated listing: an episode the site published
+// recently. The listing carries no timestamp; its order is newest first.
+type Update struct {
+	Path  string `json:"path"` // series path
+	Title string `json:"title"`
+	Dub   bool   `json:"dub"`
+	Num   string `json:"num"`   // the site's episode number, as on Episode
+	Token string `json:"token"` // episode token, as on Episode
+}
+
+var (
+	episodePathRe = regexp.MustCompile(`^(?:https?://[^/]+)?/play/[^/?#]+/([^/?#]+)`)
+	epLabelRe     = regexp.MustCompile(`(?i)^ep\.?\s*(\d+(?:\.\d+)?)$`)
+)
+
+// ParseUpdated reads the /updated page: one Update per listed episode, newest
+// first. Entries without a numbered episode (movies, specials) are skipped.
+func ParseUpdated(r io.Reader) ([]Update, error) {
+	doc, err := goquery.NewDocumentFromReader(r)
+	if err != nil {
+		return nil, err
+	}
+	if doc.Find(".film-list").Length() == 0 {
+		return nil, errors.New("no .film-list in page: markup changed or request blocked")
+	}
+	var ups []Update
+	seen := map[string]bool{}
+	doc.Find(".film-list .item").Each(func(_ int, it *goquery.Selection) {
+		a := it.Find("a.name").First()
+		href, _ := a.Attr("href")
+		path, tok := SeriesPath(href), ""
+		if m := episodePathRe.FindStringSubmatch(href); m != nil {
+			tok = m[1]
+		}
+		lbl := epLabelRe.FindStringSubmatch(strings.TrimSpace(it.Find(".status .ep").First().Text()))
+		if path == "" || tok == "" || lbl == nil || seen[tok] {
+			return
+		}
+		seen[tok] = true
+		ups = append(ups, Update{Path: path, Title: CleanTitle(a.Text()), Dub: IsDub(path), Num: lbl[1], Token: tok})
+	})
+	if len(ups) == 0 { // the listing is never empty: the item markup changed
+		return nil, errors.New("no episode in .film-list: markup changed")
+	}
+	return ups, nil
+}
+
 // ParseSeries reads a series (episode) page. The caller sets Path.
 func ParseSeries(r io.Reader) (Series, error) {
 	doc, err := goquery.NewDocumentFromReader(r)

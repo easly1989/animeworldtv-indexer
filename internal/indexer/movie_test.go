@@ -151,6 +151,14 @@ func TestSearchMovieUnknownIDWithoutTitleFindsNothing(t *testing.T) {
 	}
 }
 
+func TestSearchMovieWithoutQueryOrIDAsksNothing(t *testing.T) {
+	site := filmSite()
+	rels, err := newMovieService(t, site).SearchMovie(context.Background(), MovieQuery{}, 0, 100)
+	if err != nil || len(rels) != 0 || len(site.queries) != 0 {
+		t.Errorf("err=%v rels=%q queries=%q", err, titles(rels), site.queries)
+	}
+}
+
 func TestSearchMovieKeywordOnlyListsFilms(t *testing.T) {
 	site := filmSite()
 	rels, err := newMovieService(t, site).SearchMovie(context.Background(), MovieQuery{Q: "your name"}, 0, 100)

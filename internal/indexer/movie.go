@@ -36,6 +36,9 @@ func (s *Service) SearchMovie(ctx context.Context, mq MovieQuery, offset, limit 
 		}
 	}
 	kw := strings.TrimSpace(mq.Q)
+	if kw == "" && !byID { // Radarr's RSS: the latest listing has no films, so do not ask the site
+		return nil, nil
+	}
 	films, err := s.findMovies(ctx, kw, byID, want, idx)
 	if err != nil {
 		return nil, err

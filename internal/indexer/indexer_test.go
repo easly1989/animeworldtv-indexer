@@ -22,7 +22,9 @@ type fakeSite struct {
 	// Optional overrides; the defaults serve one show with a sub and a dub entry.
 	searchErrFor string // a query the site fails on
 	searchFn     func(q string) []animeworld.Hit
+	updates      []animeworld.Update // what /updated lists
 	seriesFn     func(path string) animeworld.Series
+	seriesFail   func(path string) bool // series pages the site fails on
 }
 
 func (f *fakeSite) count(k string) int { f.mu.Lock(); defer f.mu.Unlock(); return f.calls[k] }
@@ -52,8 +54,16 @@ func (f *fakeSite) Search(_ context.Context, q string) ([]animeworld.Hit, error)
 	}, nil
 }
 
+func (f *fakeSite) Updated(context.Context) ([]animeworld.Update, error) {
+	f.hit("updated")
+	return f.updates, nil
+}
+
 func (f *fakeSite) Series(_ context.Context, path string) (animeworld.Series, error) {
 	f.hit("series")
+	if f.seriesFail != nil && f.seriesFail(path) {
+		return animeworld.Series{}, errors.New("series page failed")
+	}
 	if f.seriesFn != nil {
 		return f.seriesFn(path), nil
 	}

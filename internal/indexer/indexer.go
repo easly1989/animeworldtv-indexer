@@ -22,7 +22,10 @@ import (
 
 const (
 	searchTTL  = 10 * time.Minute
-	seriesTTL  = time.Hour // airing series gain episodes
+	seriesTTL  = time.Hour           // airing series gain episodes
+	latestTTL  = 5 * time.Minute     // the /updated listing; RSS polls every ~15 min
+	idsTTL     = 30 * 24 * time.Hour // a series' MAL/AniList ids are all the latest feed reads from its page; they do not change
+	failTTL    = 20 * time.Minute    // how long the latest feed skips a series page that failed
 	metaTTL    = 30 * 24 * time.Hour
 	defaultMiB = 300 // size guess when nothing at all could be measured
 )
@@ -30,6 +33,7 @@ const (
 // Site is the part of animeworld.Client the service uses.
 type Site interface {
 	Search(ctx context.Context, q string) ([]animeworld.Hit, error)
+	Updated(ctx context.Context) ([]animeworld.Update, error)
 	Series(ctx context.Context, path string) (animeworld.Series, error)
 	FileURL(ctx context.Context, token string) (string, error)
 	FileMeta(ctx context.Context, fileURL string) (animeworld.FileMeta, error)
@@ -124,7 +128,7 @@ func (s *Service) FileURL(ctx context.Context, token string) (string, error) {
 	return s.site.FileURL(ctx, token)
 }
 
-// Search returns the releases matching q (latest updates when q is empty),
+// Search returns the releases matching q (the latest episodes when q is empty),
 // newest episode first, windowed by offset/limit. Only the window's sizes are
 // resolved. A trailing "S02E03" in q selects that season and episode.
 func (s *Service) Search(ctx context.Context, q string, offset, limit int) ([]Release, error) {
@@ -134,7 +138,8 @@ func (s *Service) Search(ctx context.Context, q string, offset, limit int) ([]Re
 // SearchTV is Search for a TV query. With a TVDB id only series the mapping
 // ties to that id are returned (plus unmapped ones when a title was given, which
 // get their season from the title); Season and Ep, when set, keep only that
-// TVDB season and episode.
+// TVDB season and episode. With neither a title nor a TVDB id it is the RSS
+// feed: the site's latest episodes (see latest).
 func (s *Service) SearchTV(ctx context.Context, tq TVQuery, offset, limit int) ([]Release, error) {
 	kw, season, ep := splitQuery(tq.Q)
 	if tq.Season > 0 {
@@ -142,6 +147,9 @@ func (s *Service) SearchTV(ctx context.Context, tq TVQuery, offset, limit int) (
 	}
 	if tq.Ep > 0 {
 		ep = tq.Ep
+	}
+	if kw == "" && tq.TVDBID == 0 {
+		return s.latest(ctx, season, ep, offset, limit)
 	}
 	idx := s.mapIndex(ctx)
 	series, err := s.find(ctx, kw, tq.TVDBID, season, idx)
@@ -153,23 +161,9 @@ func (s *Service) SearchTV(ctx context.Context, tq TVQuery, offset, limit int) (
 	for _, nb := range series {
 		se := nb.series
 		for i := len(se.Episodes) - 1; i >= 0; i-- {
-			e := se.Episodes[i]
-			r := Release{Token: e.Token, Num: e.Num, SeriesPath: se.Path, Dub: se.Dub,
-				MALID: se.MALID, AniListID: se.AniListID, TVDBID: nb.TVDB}
-			n, err := strconv.Atoi(e.Num)
-			switch {
-			case err == nil && n+nb.Offset >= 1:
-				r.Season, r.Episode = nb.Season, n+nb.Offset
-			case err == nil:
-				continue // before TVDB's first episode: never emit E00
-			case season > 0 || ep > 0:
-				continue // no TVDB number to compare with the request
+			if r, ok := newRelease(nb, se.Episodes[i], season, ep); ok {
+				rels = append(rels, r)
 			}
-			if season > 0 && r.Season != season || ep > 0 && r.Episode != ep {
-				continue
-			}
-			r.Title = releaseTitle(nb.Title, r.Season, r.Episode, e.Num, se.Dub)
-			rels = append(rels, r)
 		}
 	}
 	if offset > len(rels) {
@@ -180,6 +174,123 @@ func (s *Service) SearchTV(ctx context.Context, tq TVQuery, offset, limit int) (
 		rels = rels[:limit]
 	}
 	return rels, s.fillSizes(ctx, rels)
+}
+
+// newRelease numbers and titles one episode of a series, or reports false when
+// it must not be offered: before TVDB's first episode, or not the requested
+// season (0: any) and episode (0: any).
+func newRelease(nb numbered, e animeworld.Episode, season, ep int) (Release, bool) {
+	se := nb.series
+	r := Release{Token: e.Token, Num: e.Num, SeriesPath: se.Path, Dub: se.Dub,
+		MALID: se.MALID, AniListID: se.AniListID, TVDBID: nb.TVDB}
+	n, err := strconv.Atoi(e.Num)
+	switch {
+	case err == nil && n+nb.Offset >= 1:
+		r.Season, r.Episode = nb.Season, n+nb.Offset
+	case err == nil:
+		return r, false // before TVDB's first episode: never emit E00
+	case season > 0 || ep > 0:
+		return r, false // no TVDB number to compare with the request
+	}
+	if season > 0 && r.Season != season || ep > 0 && r.Episode != ep {
+		return r, false
+	}
+	r.Title = releaseTitle(nb.Title, r.Season, r.Episode, e.Num, se.Dub)
+	return r, true
+}
+
+// latest answers an RSS sync: the episodes in the site's /updated listing
+// (cached for latestTTL), numbered like a TV search, newest first. The listing
+// names the episode, so only the window's series pages are read, for their
+// external ids and from a long-lived cache. A call fetches at most MaxSeries
+// uncached series pages, newest first, so a cold cache warms over a few calls
+// instead of hammering the site. An episode whose series page is missing is
+// left out until a later call: guessing its numbering could grab the wrong
+// episode. Sizes never trigger a lookup (that is two requests per episode): a
+// size already measured by a search is used, the rest are estimated.
+func (s *Service) latest(ctx context.Context, season, ep, offset, limit int) ([]Release, error) {
+	idx := s.mapIndex(ctx)
+	if s.opt.Mapping != nil && idx.Empty() {
+		// Unmapped, a second cour's episode 12 would go out as S02E12 instead of
+		// S02E25 and Sonarr could grab the wrong one; the list loads in the background.
+		slog.Info("TVDB mapping not loaded yet, serving an empty latest feed")
+		return nil, nil
+	}
+	ups, err := s.updates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filtered := season != 0 || ep != 0
+	if !filtered { // with a filter the window applies to the matches, below
+		ups = window(ups, offset, limit)
+	}
+
+	var hits []animeworld.Hit
+	for _, u := range ups {
+		if !slices.ContainsFunc(hits, func(h animeworld.Hit) bool { return h.Path == u.Path }) {
+			hits = append(hits, animeworld.Hit{Path: u.Path})
+		}
+	}
+	byPath := map[string]numbered{}
+	for _, se := range s.seriesAllTTL(ctx, hits, idsTTL, s.opt.MaxSeries) {
+		byPath[se.Path] = numbered{se, idx.Resolve(se.MALID, se.AniListID, se.Title, se.Path)}
+	}
+
+	var rels []Release
+	for _, u := range ups {
+		nb, ok := byPath[u.Path]
+		if !ok {
+			continue
+		}
+		if r, ok := newRelease(nb, animeworld.Episode{Num: u.Num, Token: u.Token}, season, ep); ok {
+			r.Published = s.firstSeen(u.Token) // unless a measured file date is cached
+			var m animeworld.FileMeta
+			if s.cache.Get("meta:"+u.Token, metaTTL, &m) {
+				r.setMeta(m)
+			}
+			rels = append(rels, r)
+		}
+	}
+	estimate(rels)
+	if filtered {
+		rels = window(rels, offset, limit)
+	}
+	return rels, nil // in listing order, which is newest first
+}
+
+func window[T any](l []T, offset, limit int) []T {
+	l = l[min(offset, len(l)):]
+	if limit > 0 && limit < len(l) {
+		l = l[:limit]
+	}
+	return l
+}
+
+func (s *Service) updates(ctx context.Context) ([]animeworld.Update, error) {
+	var ups []animeworld.Update
+	if s.cache.Get("updated", latestTTL, &ups) {
+		return ups, nil
+	}
+	s.sem <- struct{}{}
+	ups, err := s.site.Updated(ctx)
+	<-s.sem
+	if err != nil {
+		return nil, err
+	}
+	s.put("updated", ups)
+	return ups, nil
+}
+
+// firstSeen is when this service first listed the episode: a stand-in for the
+// publish time when the file's Last-Modified is not (yet) known.
+func (s *Service) firstSeen(token string) time.Time {
+	var t time.Time
+	if s.cache.Get("seen:"+token, metaTTL, &t) {
+		return t
+	}
+	t = time.Now().UTC().Truncate(time.Second)
+	s.put("seen:"+token, t)
+	return t
 }
 
 // numbered is a series together with how it maps onto TVDB.
@@ -352,23 +463,39 @@ func (s *Service) hits(ctx context.Context, q string) ([]animeworld.Hit, error) 
 // seriesAll fetches the hits' series pages concurrently and keeps hit order.
 // A series that fails is logged and skipped so one bad page does not sink a search.
 func (s *Service) seriesAll(ctx context.Context, hits []animeworld.Hit) []animeworld.Series {
+	return s.seriesAllTTL(ctx, hits, seriesTTL, 0)
+}
+
+// seriesAllTTL is seriesAll accepting cached pages up to ttl old and fetching
+// at most maxFetch uncached ones (0: no limit), in hit order; the rest are
+// left out.
+func (s *Service) seriesAllTTL(ctx context.Context, hits []animeworld.Hit, ttl time.Duration, maxFetch int) []animeworld.Series {
 	out := make([]*animeworld.Series, len(hits))
 	var wg sync.WaitGroup
+	fetching := 0
 	for i, h := range hits {
+		key := "series:" + h.Path
+		var se animeworld.Series
+		if s.cache.Get(key, ttl, &se) {
+			out[i] = &se
+			continue
+		}
+		var failed bool // capped callers (the latest feed) skip a page that failed lately, so it cannot eat the cap
+		if maxFetch > 0 && (fetching == maxFetch || s.cache.Get("seriesfail:"+h.Path, failTTL, &failed)) {
+			continue
+		}
+		fetching++
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			key := "series:" + h.Path
-			var se animeworld.Series
-			if s.cache.Get(key, seriesTTL, &se) {
-				out[i] = &se
-				return
-			}
 			s.sem <- struct{}{}
 			se, err := s.site.Series(ctx, h.Path)
 			<-s.sem
 			if err != nil {
 				slog.Warn("series fetch failed", "path", h.Path, "err", err)
+				if !errors.Is(err, animeworld.ErrOriginBlocked) && ctx.Err() == nil { // a ban pauses everything anyway
+					s.put("seriesfail:"+h.Path, true)
+				}
 				return
 			}
 			s.put(key, se)
@@ -404,7 +531,7 @@ func (s *Service) fillSizes(ctx context.Context, rels []Release) error {
 	for i, r := range rels {
 		var m animeworld.FileMeta
 		if s.cache.Get("meta:"+r.Token, metaTTL, &m) {
-			rels[i].Size, rels[i].Published = m.Size, m.Modified
+			rels[i].setMeta(m)
 			continue
 		}
 		if quota == 0 {
@@ -445,13 +572,21 @@ wait:
 		select {
 		case <-c.done:
 			if c.err == nil {
-				rels[i].Size, rels[i].Published = c.meta.Size, c.meta.Modified
+				rels[i].setMeta(c.meta)
 			}
 		default: // still running: estimated below
 		}
 	}
 	estimate(rels)
 	return nil
+}
+
+// setMeta takes the measured size, and the file's date when it has one.
+func (r *Release) setMeta(m animeworld.FileMeta) {
+	r.Size = m.Size
+	if !m.Modified.IsZero() {
+		r.Published = m.Modified
+	}
 }
 
 // estimate gives every release without a measured size the median of its

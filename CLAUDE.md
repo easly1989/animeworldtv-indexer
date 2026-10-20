@@ -32,7 +32,7 @@ Things that span files and bite:
 
 - Selectors are tied to AnimeWorld's current markup (`.film-list .item a.name`, `h1#anime-title`, `a[data-episode-num][data-id]`, `a#mal-button`/`a#anilist-button`). Parsers return an error when the anchor element is missing (a broken selector must not look like "no results"). When one breaks, fetch the live page, save it under `testdata`, fix the test first.
 - Dubbed versions are separate site entries whose slug ends in `-ita`; the release title carries `[ITA]` for those and `[SUB ITA]` otherwise. Seasons are separate entries too.
-- An empty `q` serves the site's `/updated` listing (a Prowlarr indexer Test needs a non-empty feed); `/search?keyword=` with no keyword redirects away.
+- An empty `q` without `tvdbid` is the RSS path (`Service.latest`): the `/updated` listing parsed by `ParseUpdated` (episode number and token come from the listing; a Prowlarr indexer Test needs it non-empty). `/search?keyword=` with no keyword redirects away, so `Client.Search` needs a keyword.
 - A series path is `/play/<slug>.<id>`; the site 302s it to the first episode page. The direct file comes from `/api/episode/info?id=<token>` (`grabber`), and a HEAD on it gives `Content-Length` and `Last-Modified` (used as pubDate).
 - `/download` is a placeholder that 302s to the MP4; it is not authenticated, like mircrewrr's.
 
