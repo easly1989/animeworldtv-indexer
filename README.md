@@ -2,7 +2,7 @@
 
 A [Torznab](https://torznab.github.io/spec-1.3-draft/) indexer for [AnimeWorld](https://www.animeworld.ac), so Prowlarr, Sonarr and Radarr can search it. One Go binary, one container, SQLite cache.
 
-Status: keyword, TVDB-numbered TV search and movie search work end to end, with a Cloudflare fallback. Planned next: an emulated qBittorrent API that downloads the episodes and RSS.
+Status: keyword, TVDB-numbered TV search and movie search, a Cloudflare fallback and grab-to-import through an emulated qBittorrent client work end to end. Planned next: a persistent download queue and RSS.
 
 ## What it does
 
@@ -11,7 +11,8 @@ Status: keyword, TVDB-numbered TV search and movie search work end to end, with 
 - Titles look like `Sousou no Frieren S02E03 [SUB ITA]`. Dubbed entries (separate series on the site) get `[ITA]`.
 - Every item has a size and date from a `HEAD` on the episode's direct MP4. Lookups are cached in SQLite and bounded; if a search runs out of time budget, the remaining sizes are estimated from the same series while the real ones finish in the background.
 - An empty `q` returns the site's latest updates, which is what Prowlarr's indexer Test uses.
-- `GET /download?ep=<token>` currently redirects to the MP4. It will become the hand-off to the download client.
+- `GET /download?ep=<token>&n=<title>` redirects to a magnet (`magnet:?xt=urn:btih:<hash>&dn=<title>&aw=<token>`). The hash is derived from the episode token; `aw` carries the token itself. Sonarr and Radarr pass that magnet to their download client.
+- `/api/v2/...` emulates the **qBittorrent Web API** (the subset Sonarr and Radarr use). Adding the magnet downloads the episode's MP4 over HTTP to `<DOWNLOAD_DIR>/<category>/<title>.mp4` and reports progress and completion like a torrent, so they import the file from the shared volume. The queue is in memory for now: a restart forgets running downloads.
 - `GET /health` returns JSON status, including a `solver` object: `configured`, `url`, `cookies_valid` (valid solved Cloudflare cookies are cached) and `expires_at`. Logs are JSON on stdout.
 
 ### Cloudflare fallback
@@ -41,6 +42,25 @@ Add an indexer of type **Generic Torznab**:
 | API Path | `/api` |
 | API Key | your `API_KEY` |
 | Categories | `5070` (TV/Anime), plus `2000` (Movies) for Radarr |
+
+### Sonarr / Radarr
+
+Add a download client of type **qBittorrent**:
+
+| Field | Value |
+|---|---|
+| Host | `animeworld-indexer` (the container name) |
+| Port | `9698` |
+| Use SSL | off |
+| Username | anything, for example `animeworld` |
+| Password | your `API_KEY` |
+| Category | for example `sonarr` (files land in `/downloads/sonarr/`) |
+
+The **Test** button should pass. Sonarr/Radarr must see the downloads folder at the same path as this container, or you need a Remote Path Mapping (host `animeworld-indexer`). In the compose example the volume is `/volume1/media/downloads:/downloads` on both sides.
+
+Run the container as the user that owns the media (`user: "1000:1000"` in the example), so the imported files have the right owner. The image creates `/app/data` and `/downloads` owned by 1000:1000; a bind-mounted folder keeps the owner it has on the host, so make it writable by that user. A download that receives no data for 60 s, or answers with a web page instead of a video, fails and shows as an error in the client.
+
+If you search through Prowlarr, add the indexer to Sonarr/Radarr via Prowlarr as usual (Prowlarr passes the magnet on); no extra setup is needed. In Sonarr, leave "Remove Completed" on: once a file is imported the finished entry is removed together with the downloaded copy.
 
 ### TVDB numbering
 

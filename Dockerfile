@@ -15,12 +15,16 @@ LABEL org.opencontainers.image.source="https://github.com/easly1989/animeworldtv
 LABEL org.opencontainers.image.description="Torznab indexer for AnimeWorld"
 RUN apk add --no-cache ca-certificates tzdata
 COPY --from=build /out/animeworldtv-indexer /usr/local/bin/animeworldtv-indexer
+# Owned by 1000:1000 so `user: "1000:1000"` works on fresh volumes. A bind mount
+# keeps the host folder's owner: make it writable by that user.
+RUN mkdir -p /app/data /downloads && chown 1000:1000 /app/data /downloads
 
 ENV PROXY_HOST=0.0.0.0 \
     PROXY_PORT=9698 \
     DATA_DIR=/app/data \
+    DOWNLOAD_DIR=/downloads \
     LOG_LEVEL=INFO
-VOLUME ["/app/data"]
+VOLUME ["/app/data", "/downloads"]
 EXPOSE 9698
 
 # busybox wget ships with alpine; no curl needed.

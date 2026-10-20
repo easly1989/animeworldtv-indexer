@@ -18,8 +18,10 @@ import (
 
 	"github.com/easly1989/animeworldtv-indexer/internal/animeworld"
 	"github.com/easly1989/animeworldtv-indexer/internal/config"
+	"github.com/easly1989/animeworldtv-indexer/internal/downloader"
 	"github.com/easly1989/animeworldtv-indexer/internal/indexer"
 	"github.com/easly1989/animeworldtv-indexer/internal/mapping"
+	"github.com/easly1989/animeworldtv-indexer/internal/qbit"
 	"github.com/easly1989/animeworldtv-indexer/internal/solver"
 	"github.com/easly1989/animeworldtv-indexer/internal/store"
 	"github.com/easly1989/animeworldtv-indexer/internal/torznab"
@@ -44,7 +46,7 @@ func run() error {
 		return err
 	}
 	if cfg.APIKey == "" {
-		slog.Warn("API_KEY is empty: the Torznab API is open to anyone who can reach it")
+		slog.Warn("API_KEY is empty: the Torznab and qBittorrent APIs are open to anyone who can reach them")
 	}
 
 	db, err := store.Open(filepath.Join(cfg.DataDir, "cache.db"))
@@ -66,7 +68,11 @@ func run() error {
 		Titles: mapping.NewTitles(mapping.AniListURL, db),
 	})
 
+	dl := downloader.New(svc, cfg.DownloadDir, nil)
+	defer dl.Close()
+
 	mux := http.NewServeMux()
+	mux.Handle("/api/v2/", qbit.New(qbit.Options{APIKey: cfg.APIKey}, dl))
 	mux.Handle("/", torznab.New(torznab.Options{APIKey: cfg.APIKey, SiteURL: cfg.BaseURL}, svc))
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

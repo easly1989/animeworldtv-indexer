@@ -9,12 +9,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"regexp"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/easly1989/animeworldtv-indexer/internal/animeworld"
+	"github.com/easly1989/animeworldtv-indexer/internal/downloader"
 	"github.com/easly1989/animeworldtv-indexer/internal/indexer"
 )
 
@@ -31,7 +32,6 @@ type Backend interface {
 	Search(ctx context.Context, q string, offset, limit int) ([]indexer.Release, error)
 	SearchTV(ctx context.Context, tq indexer.TVQuery, offset, limit int) ([]indexer.Release, error)
 	SearchMovie(ctx context.Context, mq indexer.MovieQuery, offset, limit int) ([]indexer.Release, error)
-	FileURL(ctx context.Context, token string) (string, error)
 }
 
 type Options struct {
@@ -137,7 +137,7 @@ func (h *handler) search(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) item(sb *strings.Builder, base string, r indexer.Release) {
-	link := base + "/download?ep=" + r.Token
+	link := base + "/download?ep=" + r.Token + "&n=" + url.QueryEscape(r.Title)
 	cat := catAnime
 	if r.Movie {
 		cat = catMovies
@@ -179,24 +179,18 @@ func (h *handler) item(sb *strings.Builder, base string, r indexer.Release) {
 	sb.WriteString("</item>\n")
 }
 
-// download is a placeholder handoff: it sends the client straight to the MP4.
+// download hands the grab to the download client: Sonarr/Radarr follow this
+// redirect to a magnet and pass it to the emulated qBittorrent API, which does
+// the actual HTTP download (see internal/qbit). n is the release title, which
+// names the file.
 func (h *handler) download(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("ep")
-	if !tokenRe.MatchString(token) {
+	if !downloader.ValidToken(token) {
 		http.Error(w, "missing or malformed ep", http.StatusBadRequest)
 		return
 	}
-	u, err := h.b.FileURL(r.Context(), token)
-	if err != nil {
-		slog.Error("download lookup failed", "episode", token, "err", err)
-		http.Error(w, "episode lookup failed", http.StatusBadGateway)
-		return
-	}
-	http.Redirect(w, r, u, http.StatusFound)
+	http.Redirect(w, r, downloader.Magnet(token, r.URL.Query().Get("n")), http.StatusFound)
 }
-
-// Episode tokens are URL-safe base64-ish ("NFYNE-").
-var tokenRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // wantsAnime reports whether a cat= filter leaves room for our category. No
 // filter means everything.

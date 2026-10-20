@@ -22,6 +22,10 @@ type Config struct {
 	// challenges a request.
 	FlareSolverrURL string
 
+	// DownloadDir is where the emulated qBittorrent client saves episodes, in
+	// <DownloadDir>/<category>/. Sonarr/Radarr must see the same path.
+	DownloadDir string
+
 	MaxSeries    int           // series expanded per search
 	Concurrency  int           // simultaneous requests to AnimeWorld
 	SearchBudget time.Duration // how long a search waits for file sizes
@@ -67,6 +71,7 @@ func Load(getenv func(string) string) (Config, error) {
 		BaseURL:         strings.TrimRight(str("ANIMEWORLD_URL", "https://www.animeworld.ac"), "/"),
 		LogLevel:        strings.ToUpper(str("LOG_LEVEL", "INFO")),
 		FlareSolverrURL: str("FLARESOLVERR_URL", "http://byparr:8191"),
+		DownloadDir:     str("DOWNLOAD_DIR", "/downloads"),
 		MaxSeries:       num("MAX_SERIES", 8, 1),
 		Concurrency:     num("CONCURRENCY", 4, 1),
 		SearchBudget:    d,
