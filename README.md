@@ -14,6 +14,37 @@ Status: keyword, TVDB-numbered TV search and movie search, a Cloudflare fallback
 - `GET /download?ep=<token>&n=<title>` redirects to a magnet (`magnet:?xt=urn:btih:<hash>&dn=<title>&aw=<token>`). The hash is derived from the episode token; `aw` carries the token itself. Sonarr and Radarr pass that magnet to their download client.
 - `/api/v2/...` emulates the **qBittorrent Web API** (the subset Sonarr and Radarr use). Adding the magnet downloads the episode's MP4 over HTTP to `<DOWNLOAD_DIR>/<category>/<title>.mp4` and reports progress and completion like a torrent, so they import the file from the shared volume. The queue is in memory for now: a restart forgets running downloads.
 - `GET /health` returns JSON status, including a `solver` object: `configured`, `url`, `cookies_valid` (valid solved Cloudflare cookies are cached) and `expires_at`. Logs are JSON on stdout.
+- `GET /api/status` and `GET /api/logs` are the operational API the mircrewrr panel reads (see [Status and logs API](#status-and-logs-api)).
+
+### Status and logs API
+
+Both endpoints need the API key, as an `X-Api-Key` header (preferred) or the `apikey` query parameter; without it they answer `401`.
+
+`GET /api/status` returns JSON:
+
+```json
+{
+  "service": "animeworldtv-indexer", "version": "1.2.0", "uptime_seconds": 3600, "status": "ok",
+  "site": {"url": "https://www.animeworld.ac", "reachable": true},
+  "solver": {"configured": true, "url": "http://byparr:8191", "cookies_valid": false, "expires_at": null},
+  "queue": [{"hash": "40-hex", "name": "Frieren S01E03 [SUB ITA]", "category": "tv-sonarr", "state": "downloading",
+             "progress": 0.42, "size": 399962216, "downloaded": 167984130, "dlspeed": 5242880, "eta": 44,
+             "added_at": "2026-10-20T21:30:00Z"}],
+  "errors": [{"timestamp": "2026-10-20 23:31:02", "message": "file size lookup failed: ..."}]
+}
+```
+
+- `status` is `degraded` when the last request to the site failed (connection error, 5xx or a Cloudflare challenge that could not be solved), `ok` otherwise; `site.reachable` is the same fact.
+- `queue[].state` is `queued`, `downloading`, `completed`, `error` or `paused`. Completed items stay listed until Sonarr/Radarr remove them. `eta` is seconds, `0` when unknown; a failed item also carries an `error` text.
+- `errors` holds the last 20 ERROR log entries, newest last.
+
+`GET /api/logs` is a `text/event-stream`. The first event is a JSON array with the last 100 log entries, every later event an array with one new entry, and `: keepalive` comments arrive every 15 s while idle:
+
+```
+data: [{"timestamp":"2026-10-20 23:31:02","level":"INFO","logger":"app","message":"listening addr=:9698"}]
+```
+
+`timestamp` is local time, `level` is `DEBUG`, `INFO`, `WARNING` or `ERROR`. `logger` is the `logger` or `component` attribute of the record, `app` when there is none; the other attributes are appended to `message` as `key=value`. The service keeps the last 500 entries; a client that cannot keep up misses entries instead of slowing the service down.
 
 ### Cloudflare fallback
 
