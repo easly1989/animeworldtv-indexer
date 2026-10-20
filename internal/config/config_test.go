@@ -11,7 +11,8 @@ func TestDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.Port != 9698 || c.Host != "0.0.0.0" || c.DataDir != "/app/data" || c.BaseURL != "https://www.animeworld.ac" ||
-		c.LogLevel != "INFO" || c.MaxSeries != 8 || c.Concurrency != 4 || c.SearchBudget != 40*time.Second {
+		c.LogLevel != "INFO" || c.MaxSeries != 8 || c.Concurrency != 4 || c.SearchBudget != 40*time.Second ||
+		c.MappingRefresh != 24*time.Hour || c.MappingURL != "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-full.json" {
 		t.Errorf("unexpected defaults: %+v", c)
 	}
 }
@@ -32,7 +33,7 @@ func TestOverrides(t *testing.T) {
 }
 
 func TestBadValuesAreErrors(t *testing.T) {
-	for k, v := range map[string]string{"PROXY_PORT": "abc", "CONCURRENCY": "0", "SEARCH_BUDGET": "soon", "MAX_SERIES": "-1"} {
+	for k, v := range map[string]string{"PROXY_PORT": "abc", "CONCURRENCY": "0", "SEARCH_BUDGET": "soon", "MAX_SERIES": "-1", "MAPPING_REFRESH": "daily"} {
 		if _, err := Load(func(key string) string {
 			if key == k {
 				return v

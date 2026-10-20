@@ -19,6 +19,7 @@ import (
 	"github.com/easly1989/animeworldtv-indexer/internal/animeworld"
 	"github.com/easly1989/animeworldtv-indexer/internal/config"
 	"github.com/easly1989/animeworldtv-indexer/internal/indexer"
+	"github.com/easly1989/animeworldtv-indexer/internal/mapping"
 	"github.com/easly1989/animeworldtv-indexer/internal/store"
 	"github.com/easly1989/animeworldtv-indexer/internal/torznab"
 )
@@ -48,8 +49,11 @@ func run() error {
 	}
 	defer db.Close()
 
+	maps := mapping.NewSource(cfg.MappingURL, db, cfg.MappingRefresh)
+	go maps.Index(context.Background()) // warm up so the first search does not wait for the download
 	svc := indexer.New(animeworld.New(cfg.BaseURL, nil), db, indexer.Options{
-		MaxSeries: cfg.MaxSeries, Concurrency: cfg.Concurrency, Budget: cfg.SearchBudget,
+		MaxSeries: cfg.MaxSeries, Concurrency: cfg.Concurrency, Budget: cfg.SearchBudget, Mapping: maps,
+		Titles: mapping.NewTitles(mapping.AniListURL, db),
 	})
 
 	mux := http.NewServeMux()

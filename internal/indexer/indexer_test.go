@@ -16,8 +16,12 @@ import (
 type fakeSite struct {
 	mu        sync.Mutex
 	calls     map[string]int
+	queries   []string
 	metaDelay time.Duration
 	metaFail  bool
+	// Optional overrides; the defaults serve one show with a sub and a dub entry.
+	searchFn func(q string) []animeworld.Hit
+	seriesFn func(path string) animeworld.Series
 }
 
 func (f *fakeSite) count(k string) int { f.mu.Lock(); defer f.mu.Unlock(); return f.calls[k] }
@@ -32,6 +36,12 @@ func (f *fakeSite) hit(k string) {
 
 func (f *fakeSite) Search(_ context.Context, q string) ([]animeworld.Hit, error) {
 	f.hit("search")
+	f.mu.Lock()
+	f.queries = append(f.queries, q)
+	f.mu.Unlock()
+	if f.searchFn != nil {
+		return f.searchFn(q), nil
+	}
 	return []animeworld.Hit{
 		{Path: "/play/show.aaa", Title: "Show"},
 		{Path: "/play/show-ita.bbb", Title: "Show", Dub: true},
@@ -40,6 +50,9 @@ func (f *fakeSite) Search(_ context.Context, q string) ([]animeworld.Hit, error)
 
 func (f *fakeSite) Series(_ context.Context, path string) (animeworld.Series, error) {
 	f.hit("series")
+	if f.seriesFn != nil {
+		return f.seriesFn(path), nil
+	}
 	s := animeworld.Series{Path: path, Title: "Show", Dub: animeworld.IsDub(path), MALID: 1}
 	for i := 1; i <= 3; i++ {
 		s.Episodes = append(s.Episodes, animeworld.Episode{Num: fmt.Sprint(i), Token: fmt.Sprintf("%s-%d", path, i)})
@@ -85,7 +98,7 @@ func TestSearchBuildsTaggedReleasesWithSizes(t *testing.T) {
 		t.Fatalf("want 6 releases, got %d", len(rels))
 	}
 	first, dubbed := rels[0], rels[3]
-	if first.Title != "Show - 03 [SUB ITA]" || dubbed.Title != "Show - 03 [ITA]" {
+	if first.Title != "Show S01E03 [SUB ITA]" || dubbed.Title != "Show S01E03 [ITA]" {
 		t.Errorf("titles: %q / %q (latest episode first, series in hit order)", first.Title, dubbed.Title)
 	}
 	for _, r := range rels {
@@ -119,7 +132,7 @@ func TestWindowOnlyResolvesRequestedSizes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rels) != 2 || rels[0].Title != "Show - 02 [SUB ITA]" {
+	if len(rels) != 2 || rels[0].Title != "Show S01E02 [SUB ITA]" {
 		t.Fatalf("window wrong: %+v", rels)
 	}
 	if n := site.count("meta"); n != 2 {
@@ -157,7 +170,7 @@ func TestFailedSizesStillYieldNonZeroEstimate(t *testing.T) {
 }
 
 func TestNumberedTitleKeepsNonIntegerEpisodes(t *testing.T) {
-	if got := releaseTitle("Show", "12.5", false); got != "Show - 12.5 [SUB ITA]" {
+	if got := releaseTitle("Show", 0, 0, "12.5", false); got != "Show - 12.5 [SUB ITA]" {
 		t.Errorf("got %q", got)
 	}
 }
