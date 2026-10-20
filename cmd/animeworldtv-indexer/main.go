@@ -19,11 +19,15 @@ import (
 	"github.com/easly1989/animeworldtv-indexer/internal/animeworld"
 	"github.com/easly1989/animeworldtv-indexer/internal/config"
 	"github.com/easly1989/animeworldtv-indexer/internal/indexer"
+	"github.com/easly1989/animeworldtv-indexer/internal/solver"
 	"github.com/easly1989/animeworldtv-indexer/internal/store"
 	"github.com/easly1989/animeworldtv-indexer/internal/torznab"
 )
 
 var version = "dev" // set by -ldflags in the Docker build
+
+// How long solved Cloudflare cookies are trusted (cf_clearance lasts longer; same as mircrewrr).
+const solverTTL = 12 * time.Hour
 
 func main() {
 	if err := run(); err != nil {
@@ -48,7 +52,13 @@ func run() error {
 	}
 	defer db.Close()
 
-	svc := indexer.New(animeworld.New(cfg.BaseURL, nil), db, indexer.Options{
+	site := animeworld.New(cfg.BaseURL, nil)
+	var sol *solver.Solver
+	if cfg.FlareSolverrURL != "" {
+		sol = solver.New(cfg.FlareSolverrURL, cfg.BaseURL, solverTTL, db)
+		site.UseSolver(sol)
+	}
+	svc := indexer.New(site, db, indexer.Options{
 		MaxSeries: cfg.MaxSeries, Concurrency: cfg.Concurrency, Budget: cfg.SearchBudget,
 	})
 
@@ -56,7 +66,7 @@ func run() error {
 	mux.Handle("/", torznab.New(torznab.Options{APIKey: cfg.APIKey, SiteURL: cfg.BaseURL}, svc))
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "version": version, "site": cfg.BaseURL})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "version": version, "site": cfg.BaseURL, "solver": sol.Status()})
 	})
 
 	srv := &http.Server{

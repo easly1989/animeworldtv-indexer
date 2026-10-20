@@ -5,6 +5,7 @@ package torznab
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/easly1989/animeworldtv-indexer/internal/animeworld"
 	"github.com/easly1989/animeworldtv-indexer/internal/indexer"
 )
 
@@ -91,6 +93,10 @@ func (h *handler) search(w http.ResponseWriter, r *http.Request) {
 	if wantsAnime(q.Get("cat")) {
 		var err error
 		rels, err = h.b.Search(r.Context(), strings.TrimSpace(q.Get("q")), offset, limit)
+		if errors.Is(err, animeworld.ErrBlocked) { // Cloudflare in the way: an empty feed, not an error
+			slog.Error("search blocked by Cloudflare, returning no results", "q", q.Get("q"), "err", err)
+			rels, err = nil, nil
+		}
 		if err != nil {
 			slog.Error("search failed", "q", q.Get("q"), "err", err)
 			writeError(w, http.StatusBadGateway, 900, "Search failed: "+err.Error())
