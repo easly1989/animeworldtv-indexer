@@ -248,6 +248,37 @@ func TestAddRejectsForeignAndBrokenLinks(t *testing.T) {
 	}
 }
 
+// Sonarr's Test creates the category, then expects to find it by the same
+// name; a grab is then looked up by that name too.
+func TestCategoryWithSlashRoundTrips(t *testing.T) {
+	h := newHarness(t)
+	h.login()
+	h.do("POST", "/api/v2/torrents/createCategory", url.Values{"category": {"tv/anime"}})
+	_, body := h.do("GET", "/api/v2/torrents/categories", nil)
+	var cats map[string]any
+	if err := json.Unmarshal([]byte(body), &cats); err != nil || cats["tv/anime"] == nil {
+		t.Fatalf("categories: %s", body)
+	}
+	h.do("POST", "/api/v2/torrents/add", url.Values{"urls": {downloader.Magnet("vlhlNp", "Show - 01")}, "category": {"tv/anime"}})
+	if got := h.info("?category=" + url.QueryEscape("tv/anime")); len(got) != 1 || got[0].Category != "tv/anime" {
+		t.Errorf("grab not found by its category: %+v", got)
+	}
+}
+
+func TestLoginFormIsCapped(t *testing.T) {
+	h := newHarness(t)
+	// The right password, followed by 1 MiB of padding.
+	body := "username=a&password=" + key + "&pad=" + strings.Repeat("x", 1<<20)
+	resp, err := http.Post(h.api.URL+"/api/v2/auth/login", "application/x-www-form-urlencoded", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if b, _ := io.ReadAll(resp.Body); string(b) != "Fails." {
+		t.Errorf("oversized login accepted: %q", b)
+	}
+}
+
 func TestFailedDownloadShowsAsError(t *testing.T) {
 	h := newHarness(t)
 	h.login()

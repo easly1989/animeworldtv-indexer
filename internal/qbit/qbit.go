@@ -64,6 +64,7 @@ func New(opt Options, dl *downloader.Manager) http.Handler {
 }
 
 func (h *handler) login(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10) // an oversized form fails the login
 	if h.opt.APIKey != "" && !sameKey(r.FormValue("password"), h.opt.APIKey) {
 		text(w, "Fails.")
 		return

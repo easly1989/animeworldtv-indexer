@@ -58,7 +58,7 @@ Add a download client of type **qBittorrent**:
 
 The **Test** button should pass. Sonarr/Radarr must see the downloads folder at the same path as this container, or you need a Remote Path Mapping (host `animeworld-indexer`). In the compose example the volume is `/volume1/media/downloads:/downloads` on both sides.
 
-Run the container as the user that owns the media (`user: "1000:1000"` in the example), so the imported files have the right owner. `/app/data` and the downloads folder must be writable by that user.
+Run the container as the user that owns the media (`user: "1000:1000"` in the example), so the imported files have the right owner. The image creates `/app/data` and `/downloads` owned by 1000:1000; a bind-mounted folder keeps the owner it has on the host, so make it writable by that user. A download that receives no data for 60 s, or answers with a web page instead of a video, fails and shows as an error in the client.
 
 If you search through Prowlarr, add the indexer to Sonarr/Radarr via Prowlarr as usual (Prowlarr passes the magnet on); no extra setup is needed. In Sonarr, leave "Remove Completed" on: once a file is imported the finished entry is removed together with the downloaded copy.
 

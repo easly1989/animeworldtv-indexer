@@ -25,6 +25,11 @@ import (
 // A browser-like agent: the file servers sit behind the same CDN as the site.
 const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
 
+const (
+	idleTimeout = 60 * time.Second
+	deleteWait  = 5 * time.Second // how long Delete waits for the download goroutine
+)
+
 type State int
 
 const (
@@ -56,19 +61,28 @@ type Job struct {
 	lastDone  int64
 }
 
-// Path is the final file, TempPath the one being written.
-func (j Job) Path() string     { return filepath.Join(j.SavePath, j.Name+".mp4") }
-func (j Job) TempPath() string { return j.Path() + ".part" }
+// Path is the final file.
+func (j Job) Path() string { return filepath.Join(j.SavePath, j.Name+".mp4") }
 
+// entry is a Job plus what runs it. The path helpers read only fields that
+// never change after Add, so they are safe to call while the download goroutine
+// updates the progress fields under Manager.mu.
 type entry struct {
 	Job
 	cancel context.CancelFunc
+	done   chan struct{} // closed when the download goroutine has returned
 }
+
+func (e *entry) path() string { return filepath.Join(e.SavePath, e.Name+".mp4") }
+
+// tmp carries the hash so two jobs never write the same partial file.
+func (e *entry) tmp() string { return e.path() + "." + e.Hash[:8] + ".part" }
 
 type Manager struct {
 	res  Resolver
 	dir  string
 	http *http.Client
+	idle time.Duration // a download that receives nothing for this long fails
 	ctx  context.Context
 	stop context.CancelFunc
 	wg   sync.WaitGroup
@@ -89,7 +103,7 @@ func New(res Resolver, dir string, hc *http.Client) *Manager {
 		}}
 	}
 	ctx, stop := context.WithCancel(context.Background())
-	return &Manager{res: res, dir: dir, http: hc, ctx: ctx, stop: stop,
+	return &Manager{res: res, dir: dir, http: hc, idle: idleTimeout, ctx: ctx, stop: stop,
 		jobs: map[string]*entry{}, cats: map[string]bool{}}
 }
 
@@ -108,7 +122,9 @@ func (m *Manager) Close() {
 }
 
 // Add queues an episode (idempotent per episode) and starts downloading it. A
-// previous failed attempt is restarted.
+// previous failed attempt is restarted, and so is a completed one whose file
+// has disappeared (the client asks again after it lost the file). The category
+// is a label kept as given; only the folder name is made filesystem-safe.
 func (m *Manager) Add(token, name, category string) (Job, error) {
 	if !ValidToken(token) {
 		return Job{}, errors.New("malformed episode token")
@@ -118,28 +134,45 @@ func (m *Manager) Add(token, name, category string) (Job, error) {
 	if name == "" {
 		name = token
 	}
-	category = SafeName(category)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if old := m.jobs[hash]; old != nil && old.State != Failed {
-		return old.Job, nil
+	if old := m.jobs[hash]; old != nil {
+		switch {
+		case old.State == Failed:
+		case old.State == Completed && !exists(old.path()):
+		default:
+			return old.Job, nil
+		}
 	}
 	if category != "" {
 		m.cats[category] = true
 	}
+	savePath := m.SavePath(category)
+	for _, o := range m.jobs { // another episode with the same file name
+		if o.Hash != hash && o.SavePath == savePath && strings.EqualFold(o.Name, name) {
+			name += " [" + hash[:8] + "]"
+			break
+		}
+	}
 	ctx, cancel := context.WithCancel(m.ctx)
 	e := &entry{Job: Job{
 		Hash: hash, Token: token, Name: name, Category: category,
-		SavePath: m.SavePath(category), Added: time.Now(),
-	}, cancel: cancel}
+		SavePath: savePath, Added: time.Now(),
+	}, cancel: cancel, done: make(chan struct{})}
 	m.jobs[hash] = e
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		defer close(e.done)
 		m.run(ctx, e)
 	}()
 	return e.Job, nil
+}
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // List returns every job, oldest first.
@@ -166,7 +199,6 @@ func (m *Manager) Get(hash string) (Job, bool) {
 // SetCategory relabels a job. Files are not moved: like qBittorrent without
 // automatic torrent management, the save path stays where it was.
 func (m *Manager) SetCategory(hash, category string) {
-	category = SafeName(category)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if category != "" {
@@ -179,7 +211,7 @@ func (m *Manager) SetCategory(hash, category string) {
 
 // AddCategory records a category so it is listed even when empty.
 func (m *Manager) AddCategory(name string) {
-	if name = SafeName(name); name != "" {
+	if name != "" {
 		m.mu.Lock()
 		m.cats[name] = true
 		m.mu.Unlock()
@@ -198,7 +230,8 @@ func (m *Manager) Categories() []string {
 }
 
 // Delete stops a job and forgets it; with files it also removes what was
-// downloaded. A partial file is always removed.
+// downloaded. It waits (bounded) for the download to stop, so the files are not
+// touched again afterwards and the same episode can be added right away.
 func (m *Manager) Delete(hash string, files bool) bool {
 	hash = strings.ToLower(hash)
 	m.mu.Lock()
@@ -209,9 +242,14 @@ func (m *Manager) Delete(hash string, files bool) bool {
 		return false
 	}
 	e.cancel()
+	select {
+	case <-e.done:
+	case <-time.After(deleteWait):
+		slog.Warn("download did not stop in time", "episode", e.Token)
+	}
 	if files {
-		if err := os.Remove(e.Path()); err != nil && !errors.Is(err, os.ErrNotExist) {
-			slog.Warn("delete file failed", "path", e.Path(), "err", err)
+		if err := os.Remove(e.path()); err != nil && !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("delete file failed", "path", e.path(), "err", err)
 		}
 	}
 	return true
@@ -239,7 +277,19 @@ func (m *Manager) fetch(ctx context.Context, e *entry) (err error) {
 	if err != nil {
 		return fmt.Errorf("resolve episode: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+
+	// attempt ends when the job is deleted or when nothing arrives for m.idle.
+	attempt, cancel := context.WithCancel(ctx)
+	defer cancel()
+	idle := time.AfterFunc(m.idle, cancel)
+	defer idle.Stop()
+	defer func() {
+		if err != nil && ctx.Err() == nil && attempt.Err() != nil {
+			err = fmt.Errorf("stalled: no data for %s", m.idle)
+		}
+	}()
+
+	req, err := http.NewRequestWithContext(attempt, http.MethodGet, u, nil)
 	if err != nil {
 		return err
 	}
@@ -252,10 +302,14 @@ func (m *Manager) fetch(ctx context.Context, e *entry) (err error) {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET file: %s", resp.Status)
 	}
+	// A challenge or error page comes back as 200 HTML; never save it as a video.
+	if ct := resp.Header.Get("Content-Type"); strings.HasPrefix(strings.ToLower(ct), "text/") {
+		return fmt.Errorf("not a video: Content-Type %s", ct)
+	}
 	if err := os.MkdirAll(e.SavePath, 0o755); err != nil {
 		return err
 	}
-	tmp := e.TempPath()
+	tmp := e.tmp()
 	f, err := os.Create(tmp)
 	if err != nil {
 		return err
@@ -270,7 +324,7 @@ func (m *Manager) fetch(ctx context.Context, e *entry) (err error) {
 	m.mu.Lock()
 	e.Size = max(resp.ContentLength, 0)
 	m.mu.Unlock()
-	n, err := io.Copy(f, &progress{r: resp.Body, m: m, e: e})
+	n, err := io.Copy(f, &progress{r: resp.Body, m: m, e: e, idle: idle})
 	if err != nil {
 		return err
 	}
@@ -286,19 +340,22 @@ func (m *Manager) fetch(ctx context.Context, e *entry) (err error) {
 	m.mu.Lock()
 	e.Size = n
 	m.mu.Unlock()
-	return os.Rename(tmp, e.Path())
+	return os.Rename(tmp, e.path())
 }
 
-// progress counts bytes and refreshes the job's speed about once a second.
+// progress counts bytes, refreshes the job's speed about once a second and
+// feeds the idle timer.
 type progress struct {
-	r io.Reader
-	m *Manager
-	e *entry
+	r    io.Reader
+	m    *Manager
+	e    *entry
+	idle *time.Timer
 }
 
 func (p *progress) Read(b []byte) (int, error) {
 	n, err := p.r.Read(b)
 	if n > 0 {
+		p.idle.Reset(p.m.idle)
 		now := time.Now()
 		p.m.mu.Lock()
 		e := p.e
