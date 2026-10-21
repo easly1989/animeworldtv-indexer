@@ -52,48 +52,56 @@ func Load(getenv func(string) string) (Config, error) {
 		return def
 	}
 	var errs []string
-	num := func(key string, def, min int) int {
+	// The ranges keep a typo (or a panel edit) from unthrottling the site, which bans IPs,
+	// or from stalling the service.
+	num := func(key string, def, min, max int) int {
 		v := str(key, strconv.Itoa(def))
 		n, err := strconv.Atoi(v)
-		if err != nil || n < min {
-			errs = append(errs, fmt.Sprintf("%s=%q must be an integer >= %d", key, v, min))
+		if err != nil || n < min || n > max {
+			errs = append(errs, fmt.Sprintf("%s=%q must be an integer from %d to %d", key, v, min, max))
 			return def
 		}
 		return n
 	}
-	duration := func(key, def string) time.Duration {
+	duration := func(key, def string, min, max time.Duration) time.Duration {
 		v := str(key, def)
 		d, err := time.ParseDuration(v)
-		if err != nil || d <= 0 {
-			errs = append(errs, fmt.Sprintf("%s=%q must be a positive duration like %s", key, v, def))
+		if err != nil || d < min || d > max {
+			errs = append(errs, fmt.Sprintf("%s=%q must be a duration from %s to %s", key, v, min, max))
 		}
 		return d
 	}
 	rpsText := str("ORIGIN_RPS", "1")
 	rps, err := strconv.ParseFloat(rpsText, 64)
-	if err != nil || !(rps > 0) || math.IsInf(rps, 0) {
-		errs = append(errs, fmt.Sprintf("ORIGIN_RPS=%q must be a number > 0", rpsText))
+	if err != nil || !(rps >= 0.1 && rps <= 10) || math.IsNaN(rps) {
+		errs = append(errs, fmt.Sprintf("ORIGIN_RPS=%q must be a number from 0.1 to 10", rpsText))
 		rps = 1
 	}
-	d := duration("SEARCH_BUDGET", "40s")
-	refresh := duration("MAPPING_REFRESH", "24h")
+	level := strings.ToUpper(str("LOG_LEVEL", "INFO"))
+	switch level {
+	case "DEBUG", "INFO", "WARNING", "WARN", "ERROR":
+	default:
+		errs = append(errs, fmt.Sprintf("LOG_LEVEL=%q must be DEBUG, INFO, WARNING or ERROR", level))
+	}
+	d := duration("SEARCH_BUDGET", "40s", 5*time.Second, 5*time.Minute)
+	refresh := duration("MAPPING_REFRESH", "24h", time.Minute, 30*24*time.Hour)
 
 	c := Config{
 		APIKey:          getenv("API_KEY"),
 		Host:            str("PROXY_HOST", "0.0.0.0"),
-		Port:            num("PROXY_PORT", 9698, 1),
+		Port:            num("PROXY_PORT", 9698, 1, 65535),
 		DataDir:         str("DATA_DIR", "/app/data"),
 		BaseURL:         strings.TrimRight(str("ANIMEWORLD_URL", "https://www.animeworld.ac"), "/"),
-		LogLevel:        strings.ToUpper(str("LOG_LEVEL", "INFO")),
+		LogLevel:        level,
 		FlareSolverrURL: str("FLARESOLVERR_URL", "http://byparr:8191"),
 		DownloadDir:     str("DOWNLOAD_DIR", "/downloads"),
-		MaxDownloads:    num("MAX_DOWNLOADS", 2, 1),
-		MaxSeries:       num("MAX_SERIES", 8, 1),
-		Concurrency:     num("CONCURRENCY", 4, 1),
+		MaxDownloads:    num("MAX_DOWNLOADS", 2, 1, 10),
+		MaxSeries:       num("MAX_SERIES", 8, 1, 50),
+		Concurrency:     num("CONCURRENCY", 4, 1, 16),
 		SearchBudget:    d,
-		SizeLookups:     num("SIZE_LOOKUPS", 10, 0),
+		SizeLookups:     num("SIZE_LOOKUPS", 10, 0, 100),
 		OriginRPS:       rps,
-		OriginBurst:     num("ORIGIN_BURST", 3, 1),
+		OriginBurst:     num("ORIGIN_BURST", 3, 1, 20),
 		MappingURL:      str("MAPPING_URL", "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-full.json"),
 		MappingRefresh:  refresh,
 	}

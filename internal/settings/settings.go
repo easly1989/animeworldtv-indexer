@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -68,19 +69,72 @@ func (s *Store) load() (map[string]string, error) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, fmt.Errorf("%s: %w", s.path, err)
 	}
+	// Only the panel's keys: a hand-edited {"API_KEY": ""} must not turn auth off.
+	for k := range m {
+		if !editable(k) {
+			slog.Warn("ignoring a setting the panel cannot change", "file", s.path, "key", k)
+			delete(m, k)
+		}
+	}
 	return m, nil
 }
 
+// Resolve returns the Config to start with: base (from the environment) with
+// the saved values on top. Saved values that cannot be read or no longer
+// validate would keep the container in a restart loop the panel cannot fix, so
+// they are moved aside and base is used; problem says why.
+func (s *Store) Resolve(base config.Config, getenv func(string) string) (cfg config.Config, saved map[string]string, problem error) {
+	saved, err := s.Load()
+	if err == nil {
+		if cfg, err = config.Load(Overlay(saved, getenv)); err == nil {
+			return cfg, saved, nil
+		}
+	}
+	moved, qerr := s.Quarantine()
+	if qerr != nil {
+		return base, nil, fmt.Errorf("%w (could not move it aside: %v)", err, qerr)
+	}
+	return base, nil, fmt.Errorf("%w (moved to %s)", err, moved)
+}
+
+// Quarantine moves an unreadable file aside so the service can start from the
+// environment and the panel can save again; it returns the new name.
+func (s *Store) Quarantine() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dst := s.path + ".corrupt"
+	return dst, os.Rename(s.path, dst)
+}
+
+// save replaces the file atomically and durably: a crash leaves the old file or the new one.
 func (s *Store) save(m map[string]string) error {
 	b, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	dir := filepath.Dir(s.path)
+	f, err := os.CreateTemp(dir, ".settings-*.tmp") // mode 0600
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	defer os.Remove(f.Name()) // no-op once renamed
+	if _, err = f.Write(b); err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(f.Name(), s.path); err != nil {
+		return err
+	}
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync() // persists the rename; not supported on every OS
+		d.Close()
+	}
+	return nil
 }
 
 // Overlay reads saved values first and getenv for the rest.

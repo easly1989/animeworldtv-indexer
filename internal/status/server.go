@@ -3,6 +3,7 @@ package status
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -57,28 +58,44 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/logs", s.auth(s.logs))
 	if s.opt.Settings != nil {
 		mux.HandleFunc("GET /api/settings", s.auth(s.opt.Settings.Get))
-		mux.HandleFunc("PUT /api/settings", s.keyed(s.auth(s.opt.Settings.Put)))
+		mux.HandleFunc("PUT /api/settings", s.keyed(s.opt.Settings.Put))
 	}
 	if s.opt.Restart != nil {
-		mux.HandleFunc("POST /api/restart", s.keyed(s.auth(s.restart)))
+		mux.HandleFunc("POST /api/restart", s.keyed(s.restart))
 	}
 }
 
-// keyed refuses a change when no API key is set: an open read API is a
-// choice the operator made, an open write API should not follow from it.
+// keyed guards changes: the key must be configured (an open read API is a
+// choice the operator made, an open write API should not follow from it) and
+// sent as the X-Api-Key header, never in the URL, where logs keep it.
 func (s *Server) keyed(f http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.opt.APIKey == "" {
 			http.Error(w, "set API_KEY to change settings", http.StatusForbidden)
 			return
 		}
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Api-Key")), []byte(s.opt.APIKey)) != 1 {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 		f(w, r)
 	}
 }
 
+// restartCooldown stops a restart loop driven from the panel (or a script).
+const restartCooldown = 30 * time.Second
+
 // restart answers first, then stops the service; the container's restart
 // policy starts it again with the saved settings.
 func (s *Server) restart(w http.ResponseWriter, _ *http.Request) {
+	if up := time.Since(s.started); up < restartCooldown {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": fmt.Sprintf("started %ds ago; try again in %ds", int(up.Seconds()), int((restartCooldown-up).Seconds())+1),
+		})
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte(`{"restarting":true}` + "\n"))

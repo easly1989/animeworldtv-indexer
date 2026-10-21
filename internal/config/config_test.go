@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -37,7 +38,12 @@ func TestOverrides(t *testing.T) {
 
 func TestBadValuesAreErrors(t *testing.T) {
 	for k, v := range map[string]string{"PROXY_PORT": "abc", "CONCURRENCY": "0", "SEARCH_BUDGET": "soon", "MAX_SERIES": "-1", "MAX_DOWNLOADS": "0", "MAPPING_REFRESH": "daily",
-		"ORIGIN_RPS": "0", "ORIGIN_BURST": "0", "SIZE_LOOKUPS": "-1"} {
+		"ORIGIN_RPS": "0", "ORIGIN_BURST": "0", "SIZE_LOOKUPS": "-1",
+		// Upper bounds: an unthrottled or stalled service, or a silently ignored level.
+		"ORIGIN_RPS=": "1e300", "ORIGIN_RPS==": "1e-10", "ORIGIN_RPS===": "NaN", "CONCURRENCY=": "100000000",
+		"MAX_DOWNLOADS=": "1000000", "ORIGIN_BURST=": "1000000", "MAX_SERIES=": "51", "SIZE_LOOKUPS=": "101",
+		"SEARCH_BUDGET=": "1ns", "SEARCH_BUDGET==": "6m", "LOG_LEVEL": "BOGUS", "PROXY_PORT=": "70000"} {
+		k = strings.TrimRight(k, "=") // the suffix only keeps the map keys distinct
 		if _, err := Load(func(key string) string {
 			if key == k {
 				return v

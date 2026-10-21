@@ -41,15 +41,21 @@ func main() {
 }
 
 func run() error {
-	base, _ := config.Load(os.Getenv) // only for DataDir, which the panel cannot change
-	saved := settings.Open(settings.Path(base.DataDir))
-	values, serr := saved.Load()
-	cfg, err := config.Load(settings.Overlay(values, os.Getenv))
+	cfg, err := config.Load(os.Getenv)
 	logs := status.NewHub()
-	slog.SetDefault(slog.New(logs.Handler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.SlogLevel()}))))
-	if err := errors.Join(serr, err); err != nil {
+	level := new(slog.LevelVar)
+	level.Set(cfg.SlogLevel())
+	slog.SetDefault(slog.New(logs.Handler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))))
+	if err != nil {
 		return err
 	}
+
+	saved := settings.Open(settings.Path(cfg.DataDir))
+	cfg, values, problem := saved.Resolve(cfg, os.Getenv)
+	if problem != nil {
+		slog.Error("ignoring the panel settings, starting from the environment", "err", problem)
+	}
+	level.Set(cfg.SlogLevel())
 	if len(values) > 0 {
 		slog.Info("settings saved from the admin panel override the environment", "file", settings.Path(cfg.DataDir), "keys", len(values))
 	}

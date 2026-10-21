@@ -88,9 +88,65 @@ func TestPutSavesAndAsksForRestart(t *testing.T) {
 	}
 }
 
+func TestResolve(t *testing.T) {
+	base, _ := config.Load(env(nil))
+	getenv := env(map[string]string{"API_KEY": "k"})
+	for name, tc := range map[string]struct {
+		file      string
+		downloads int
+		corrupt   bool
+	}{
+		"no file":             {"", 2, false},
+		"saved values apply":  {`{"MAX_DOWNLOADS":"3"}`, 3, false},
+		"empty file":          {" ", 2, true},
+		"truncated":           {`{"MAX_DOWNLOADS":"3"`, 2, true},
+		"a number, not text":  {`{"MAX_DOWNLOADS":3}`, 2, true},
+		"out of range now":    {`{"MAX_DOWNLOADS":"999"}`, 2, true},
+		"keys it cannot edit": {`{"API_KEY":"","ANIMEWORLD_URL":"http://evil.test","DATA_DIR":"/","MAX_DOWNLOADS":"4"}`, 4, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "settings.json")
+			if tc.file != "" {
+				if err := os.WriteFile(path, []byte(tc.file), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg, _, problem := Open(path).Resolve(base, getenv)
+			if cfg.MaxDownloads != tc.downloads || (problem != nil) != tc.corrupt {
+				t.Fatalf("downloads=%d problem=%v", cfg.MaxDownloads, problem)
+			}
+			if tc.corrupt {
+				if _, err := os.Stat(path + ".corrupt"); err != nil {
+					t.Fatal("unusable file not moved aside:", err)
+				}
+				return
+			}
+			if tc.file != "" && (cfg.APIKey != "k" || cfg.BaseURL != "https://www.animeworld.ac" || cfg.DataDir != "/app/data") {
+				t.Fatalf("a non-editable key leaked from the file: %+v", cfg)
+			}
+		})
+	}
+}
+
+func TestPutDoesNotKeepForeignKeys(t *testing.T) {
+	a, path := newAPI(t, env(nil))
+	if err := os.WriteFile(path, []byte(`{"API_KEY":"","MAX_SERIES":"9"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := call(t, a.Put, "PUT", `{"MAX_DOWNLOADS":"3"}`); code != 200 {
+		t.Fatal(code)
+	}
+	b, _ := os.ReadFile(path)
+	if strings.Contains(string(b), "API_KEY") || !strings.Contains(string(b), "MAX_SERIES") {
+		t.Fatalf("saved: %s", b)
+	}
+}
+
 func TestPutRejectsBadInput(t *testing.T) {
 	a, path := newAPI(t, env(nil))
-	for _, body := range []string{`{"MAX_DOWNLOADS":"0"}`, `{"ORIGIN_RPS":"fast"}`, `{"API_KEY":"x"}`, `{"DATA_DIR":"/"}`, `[1]`, `{"MAX_DOWNLOADS":3}`} {
+	for _, body := range []string{`{"MAX_DOWNLOADS":"0"}`, `{"ORIGIN_RPS":"fast"}`, `{"API_KEY":"x"}`, `{"DATA_DIR":"/"}`, `[1]`, `{"MAX_DOWNLOADS":3}`,
+		`{"ORIGIN_RPS":"1e300"}`, `{"ORIGIN_RPS":"1e-10"}`, `{"CONCURRENCY":"100000000"}`, `{"MAX_DOWNLOADS":"1000000"}`,
+		`{"ORIGIN_BURST":"1000000"}`, `{"SEARCH_BUDGET":"1ns"}`, `{"LOG_LEVEL":"BOGUS"}`} {
 		if code, r := call(t, a.Put, "PUT", body); code != 400 || r.Error == "" {
 			t.Errorf("%s: code=%d %+v", body, code, r)
 		}

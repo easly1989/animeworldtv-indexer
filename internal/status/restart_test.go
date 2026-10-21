@@ -28,11 +28,23 @@ func send(t *testing.T, method, url, key, body string) int {
 func TestSettingsAndRestartNeedTheKey(t *testing.T) {
 	restarted := make(chan struct{}, 1)
 	api := &settings.API{Store: settings.Open(filepath.Join(t.TempDir(), "s.json")), Getenv: func(string) string { return "" }}
-	_, _, srv := fixture(t, Options{Settings: api, Restart: func() { restarted <- struct{}{} }})
+	s, _, srv := fixture(t, Options{Settings: api, Restart: func() { restarted <- struct{}{} }})
 
 	if c := send(t, "PUT", srv.URL+"/api/settings", "wrong", `{"MAX_DOWNLOADS":"3"}`); c != 401 {
 		t.Errorf("PUT with a wrong key: %d", c)
 	}
+	// Changes take the key as a header only, never from the URL.
+	if c := send(t, "PUT", srv.URL+"/api/settings?apikey="+key, "", `{"MAX_DOWNLOADS":"3"}`); c != 401 {
+		t.Errorf("PUT with the key in the URL: %d", c)
+	}
+	if c := send(t, "POST", srv.URL+"/api/restart?apikey="+key, "", ""); c != 401 {
+		t.Errorf("restart with the key in the URL: %d", c)
+	}
+	// No restart right after a start.
+	if c := send(t, "POST", srv.URL+"/api/restart", key, ""); c != 429 {
+		t.Errorf("restart during the cooldown: %d", c)
+	}
+	s.started = time.Now().Add(-time.Minute)
 	if c := send(t, "POST", srv.URL+"/api/restart", "", ""); c != 401 {
 		t.Errorf("restart without key: %d", c)
 	}
