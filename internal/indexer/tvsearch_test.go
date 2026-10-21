@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -162,6 +163,27 @@ func TestSearchTVFindsTheShowFromTheMappingWhenNoTitleIsGiven(t *testing.T) {
 	}
 	if len(rels) != 2 || rels[0].Season != 1 || rels[0].Episode != 1 {
 		t.Errorf("got %+v", rels)
+	}
+}
+
+func TestSearchTVTreatsANumberWithTheTVDBIDAsTheEpisode(t *testing.T) {
+	site := worldSite("frieren")
+	svc := newTVService(t, site)
+	// Sonarr's anime search: tvdbid=...&q=01, no season or ep.
+	rels, err := svc.SearchTV(context.Background(), TVQuery{Q: "01", TVDBID: 424536}, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(site.queries, "01") {
+		t.Errorf("searched the site for the episode number: %q", site.queries)
+	}
+	if len(rels) == 0 {
+		t.Fatal("no releases")
+	}
+	for _, r := range rels {
+		if r.TVDBID != 424536 || r.Episode != 1 {
+			t.Errorf("got %+v", r)
+		}
 	}
 }
 
