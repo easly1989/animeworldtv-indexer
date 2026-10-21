@@ -142,6 +142,11 @@ func (s *Service) Search(ctx context.Context, q string, offset, limit int) ([]Re
 // feed: the site's latest episodes (see latest).
 func (s *Service) SearchTV(ctx context.Context, tq TVQuery, offset, limit int) ([]Release, error) {
 	kw, season, ep := splitQuery(tq.Q)
+	// Sonarr's anime search sends the TVDB id with q = the absolute episode
+	// number ("04"): that is the episode, not a keyword to search the site for.
+	if n, err := strconv.Atoi(kw); err == nil && n > 0 && tq.TVDBID != 0 && ep == 0 {
+		kw, ep = "", n
+	}
 	if tq.Season > 0 {
 		season = tq.Season
 	}
