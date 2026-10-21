@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/easly1989/animeworldtv-indexer/internal/config"
 )
@@ -67,7 +68,7 @@ func (s *Store) load() (map[string]string, error) {
 		return nil, err
 	}
 	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, fmt.Errorf("%s: %w", s.path, err)
+		return nil, fmt.Errorf("%s: %w: %w", s.path, errInvalid, err)
 	}
 	// Only the panel's keys: a hand-edited {"API_KEY": ""} must not turn auth off.
 	for k := range m {
@@ -79,12 +80,19 @@ func (s *Store) load() (map[string]string, error) {
 	return m, nil
 }
 
+// errInvalid marks a file that was read but is not valid JSON of strings.
+var errInvalid = errors.New("not a JSON object of strings")
+
 // Resolve returns the Config to start with: base (from the environment) with
-// the saved values on top. Saved values that cannot be read or no longer
+// the saved values on top. Saved values that cannot be parsed or no longer
 // validate would keep the container in a restart loop the panel cannot fix, so
-// they are moved aside and base is used; problem says why.
+// they are moved aside and base is used; problem says why. A file that cannot
+// be read right now (permissions, I/O) is left where it is.
 func (s *Store) Resolve(base config.Config, getenv func(string) string) (cfg config.Config, saved map[string]string, problem error) {
 	saved, err := s.Load()
+	if err != nil && !errors.Is(err, errInvalid) {
+		return base, nil, fmt.Errorf("%w (left in place)", err)
+	}
 	if err == nil {
 		if cfg, err = config.Load(Overlay(saved, getenv)); err == nil {
 			return cfg, saved, nil
@@ -97,12 +105,13 @@ func (s *Store) Resolve(base config.Config, getenv func(string) string) (cfg con
 	return base, nil, fmt.Errorf("%w (moved to %s)", err, moved)
 }
 
-// Quarantine moves an unreadable file aside so the service can start from the
-// environment and the panel can save again; it returns the new name.
+// Quarantine moves an unusable file aside so the service can start from the
+// environment and the panel can save again; it returns the new name, dated so
+// an earlier one is kept.
 func (s *Store) Quarantine() (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	dst := s.path + ".corrupt"
+	dst := s.path + ".corrupt-" + time.Now().UTC().Format("20060102T150405.000Z")
 	return dst, os.Rename(s.path, dst)
 }
 
@@ -137,10 +146,11 @@ func (s *Store) save(m map[string]string) error {
 	return nil
 }
 
-// Overlay reads saved values first and getenv for the rest.
+// Overlay reads saved values first and getenv for the rest; only editable keys
+// come from saved, whoever built the map.
 func Overlay(saved map[string]string, getenv func(string) string) func(string) string {
 	return func(key string) string {
-		if v, ok := saved[key]; ok {
+		if v, ok := saved[key]; ok && editable(key) {
 			return v
 		}
 		return getenv(key)
