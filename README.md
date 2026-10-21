@@ -144,6 +144,14 @@ AnimeWorld lists a film as a single-episode series whose "Categoria" is `Movie` 
 
 All environment variables are listed, with defaults, in [`.env.example`](.env.example).
 
+Some of them can also be changed from mircrewrr's admin panel: `MAX_DOWNLOADS`, `ORIGIN_RPS`, `ORIGIN_BURST`, `SIZE_LOOKUPS`, `MAX_SERIES`, `CONCURRENCY`, `SEARCH_BUDGET` and `LOG_LEVEL`. The API key, URLs and directories cannot. The panel uses these endpoints, which need the API key like the status API:
+
+- `GET /api/settings` returns `{"settings": [{"key", "label", "help", "value", "running", "saved"}], "restart_required": bool}`. `value` is what the next start will use, `running` what is in use now, and `saved` says whether the value comes from the panel rather than the environment.
+- `PUT /api/settings` takes `{"MAX_DOWNLOADS": "3"}`; an empty string removes the override. A value `Load` would reject answers `400` and nothing is saved. Saved values live in `<DATA_DIR>/settings.json` (mode 600) and **override the environment** at every start, so a later change to `.env` for the same key has no effect until the override is removed.
+- `POST /api/restart` answers `202` and stops the service cleanly; the container's restart policy (`restart: unless-stopped`) starts it again with the new values. Running downloads resume from the bytes on disk.
+
+With an empty `API_KEY`, `PUT /api/settings` and `POST /api/restart` answer `403`.
+
 ## Develop
 
 ```bash

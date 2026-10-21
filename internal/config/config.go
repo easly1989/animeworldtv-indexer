@@ -103,6 +103,21 @@ func Load(getenv func(string) string) (Config, error) {
 	return c, nil
 }
 
+// Editable returns the settings the admin panel may change, keyed by their
+// environment variable, in the form Load accepts.
+func (c Config) Editable() map[string]string {
+	return map[string]string{
+		"MAX_DOWNLOADS": strconv.Itoa(c.MaxDownloads),
+		"ORIGIN_RPS":    strconv.FormatFloat(c.OriginRPS, 'g', -1, 64),
+		"ORIGIN_BURST":  strconv.Itoa(c.OriginBurst),
+		"SIZE_LOOKUPS":  strconv.Itoa(c.SizeLookups),
+		"MAX_SERIES":    strconv.Itoa(c.MaxSeries),
+		"CONCURRENCY":   strconv.Itoa(c.Concurrency),
+		"SEARCH_BUDGET": c.SearchBudget.String(),
+		"LOG_LEVEL":     c.LogLevel,
+	}
+}
+
 // SlogLevel maps LOG_LEVEL (DEBUG, INFO, WARNING, ERROR) to slog.
 func (c Config) SlogLevel() slog.Level {
 	var l slog.Level

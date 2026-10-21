@@ -21,6 +21,7 @@ import (
 	"github.com/easly1989/animeworldtv-indexer/internal/indexer"
 	"github.com/easly1989/animeworldtv-indexer/internal/mapping"
 	"github.com/easly1989/animeworldtv-indexer/internal/qbit"
+	"github.com/easly1989/animeworldtv-indexer/internal/settings"
 	"github.com/easly1989/animeworldtv-indexer/internal/solver"
 	"github.com/easly1989/animeworldtv-indexer/internal/status"
 	"github.com/easly1989/animeworldtv-indexer/internal/store"
@@ -40,11 +41,17 @@ func main() {
 }
 
 func run() error {
-	cfg, err := config.Load(os.Getenv)
+	base, _ := config.Load(os.Getenv) // only for DataDir, which the panel cannot change
+	saved := settings.Open(settings.Path(base.DataDir))
+	values, serr := saved.Load()
+	cfg, err := config.Load(settings.Overlay(values, os.Getenv))
 	logs := status.NewHub()
 	slog.SetDefault(slog.New(logs.Handler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.SlogLevel()}))))
-	if err != nil {
+	if err := errors.Join(serr, err); err != nil {
 		return err
+	}
+	if len(values) > 0 {
+		slog.Info("settings saved from the admin panel override the environment", "file", settings.Path(cfg.DataDir), "keys", len(values))
 	}
 	if cfg.APIKey == "" {
 		slog.Warn("API_KEY is empty: the Torznab, qBittorrent and status APIs are open to anyone who can reach them")
@@ -73,12 +80,17 @@ func run() error {
 	dl := downloader.New(svc, cfg.DownloadDir, nil, downloader.WithStore(db), downloader.WithMaxDownloads(cfg.MaxDownloads))
 	defer dl.Close()
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	mux := http.NewServeMux()
 	mux.Handle("/api/v2/", qbit.New(qbit.Options{APIKey: cfg.APIKey}, dl))
 	mux.Handle("/", torznab.New(torznab.Options{APIKey: cfg.APIKey, SiteURL: cfg.BaseURL}, svc))
 	status.New(logs, status.Options{
 		APIKey: cfg.APIKey, Version: version, SiteURL: cfg.BaseURL,
 		Reachable: site.Reachable, Reason: site.Blocked, Solver: sol.Status, Jobs: dl.List,
+		Settings: &settings.API{Store: saved, Getenv: os.Getenv, Running: cfg.Editable()},
+		Restart:  stop, // a clean exit; the container's restart policy brings the service back
 	}).Register(mux)
 
 	srv := &http.Server{
@@ -86,8 +98,6 @@ func run() error {
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
