@@ -116,8 +116,8 @@ func TestResolve(t *testing.T) {
 				t.Fatalf("downloads=%d problem=%v", cfg.MaxDownloads, problem)
 			}
 			if tc.corrupt {
-				if _, err := os.Stat(path + ".corrupt"); err != nil {
-					t.Fatal("unusable file not moved aside:", err)
+				if m, _ := filepath.Glob(path + ".corrupt-*"); len(m) != 1 {
+					t.Fatal("unusable file not moved aside:", m)
 				}
 				return
 			}
@@ -125,6 +125,44 @@ func TestResolve(t *testing.T) {
 				t.Fatalf("a non-editable key leaked from the file: %+v", cfg)
 			}
 		})
+	}
+}
+
+func TestResolveLeavesAnUnreadableFileInPlace(t *testing.T) {
+	base, _ := config.Load(env(nil))
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.Mkdir(path, 0o700); err != nil { // reading a directory fails, like EACCES would
+		t.Fatal(err)
+	}
+	cfg, _, problem := Open(path).Resolve(base, env(nil))
+	if problem == nil || cfg.MaxDownloads != 2 {
+		t.Fatalf("problem=%v cfg=%+v", problem, cfg)
+	}
+	if m, _ := filepath.Glob(path + ".corrupt-*"); len(m) != 0 {
+		t.Fatal("a file that could not be read was moved aside:", m)
+	}
+}
+
+func TestQuarantineKeepsEarlierCopies(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	s := Open(path)
+	for i := 0; i < 2; i++ {
+		if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Quarantine(); err != nil { // back to back: often the same millisecond
+			t.Fatal(err)
+		}
+	}
+	if m, _ := filepath.Glob(path + ".corrupt-*"); len(m) != 2 {
+		t.Fatal("expected two dated copies:", m)
+	}
+}
+
+func TestOverlayOnlyAppliesEditableKeys(t *testing.T) {
+	get := Overlay(map[string]string{"API_KEY": "", "MAX_DOWNLOADS": "5"}, env(map[string]string{"API_KEY": "k"}))
+	if get("API_KEY") != "k" || get("MAX_DOWNLOADS") != "5" {
+		t.Fatalf("API_KEY=%q MAX_DOWNLOADS=%q", get("API_KEY"), get("MAX_DOWNLOADS"))
 	}
 }
 
