@@ -112,8 +112,13 @@ func (s *Store) Quarantine() (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	dst := s.path + ".corrupt-" + time.Now().UTC().Format("20060102T150405.000Z")
+	for i, base := 1, dst; fileExists(dst); i++ { // two in the same millisecond
+		dst = fmt.Sprintf("%s-%d", base, i)
+	}
 	return dst, os.Rename(s.path, dst)
 }
+
+func fileExists(p string) bool { _, err := os.Lstat(p); return err == nil }
 
 // save replaces the file atomically and durably: a crash leaves the old file or the new one.
 func (s *Store) save(m map[string]string) error {

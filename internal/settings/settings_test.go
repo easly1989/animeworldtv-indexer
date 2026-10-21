@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/easly1989/animeworldtv-indexer/internal/config"
 )
@@ -151,10 +150,9 @@ func TestQuarantineKeepsEarlierCopies(t *testing.T) {
 		if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.Quarantine(); err != nil {
+		if _, err := s.Quarantine(); err != nil { // back to back: often the same millisecond
 			t.Fatal(err)
 		}
-		time.Sleep(2 * time.Millisecond)
 	}
 	if m, _ := filepath.Glob(path + ".corrupt-*"); len(m) != 2 {
 		t.Fatal("expected two dated copies:", m)
