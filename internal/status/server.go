@@ -3,11 +3,14 @@ package status
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"time"
 
 	"github.com/easly1989/animeworldtv-indexer/internal/downloader"
+	"github.com/easly1989/animeworldtv-indexer/internal/settings"
 	"github.com/easly1989/animeworldtv-indexer/internal/solver"
 )
 
@@ -27,6 +30,9 @@ type Options struct {
 	Reason    func() string           // nil or "": why the site is unusable right now (an IP ban, say)
 	Solver    func() solver.Status    // nil: no solver
 	Jobs      func() []downloader.Job // nil: empty queue
+
+	Settings *settings.API // nil: no /api/settings
+	Restart  func()        // nil: no /api/restart; otherwise stops the service (Docker starts it again)
 
 	Keepalive time.Duration // 0: 15 s
 }
@@ -50,6 +56,54 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /api/status", s.auth(s.status))
 	mux.HandleFunc("GET /api/logs", s.auth(s.logs))
+	if s.opt.Settings != nil {
+		mux.HandleFunc("GET /api/settings", s.auth(s.opt.Settings.Get))
+		mux.HandleFunc("PUT /api/settings", s.keyed(s.opt.Settings.Put))
+	}
+	if s.opt.Restart != nil {
+		mux.HandleFunc("POST /api/restart", s.keyed(s.restart))
+	}
+}
+
+// keyed guards changes: the key must be configured (an open read API is a
+// choice the operator made, an open write API should not follow from it) and
+// sent as the X-Api-Key header, never in the URL, where logs keep it.
+func (s *Server) keyed(f http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.opt.APIKey == "" {
+			http.Error(w, "set API_KEY to change settings", http.StatusForbidden)
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Api-Key")), []byte(s.opt.APIKey)) != 1 {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		f(w, r)
+	}
+}
+
+// restartCooldown stops a restart loop driven from the panel (or a script).
+const restartCooldown = 30 * time.Second
+
+// restart answers first, then stops the service; the container's restart
+// policy starts it again with the saved settings.
+func (s *Server) restart(w http.ResponseWriter, _ *http.Request) {
+	if up := time.Since(s.started); up < restartCooldown {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": fmt.Sprintf("started %ds ago; try again in %ds", int(up.Seconds()), int((restartCooldown-up).Seconds())+1),
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_, _ = w.Write([]byte(`{"restarting":true}` + "\n"))
+	if fl, ok := w.(http.Flusher); ok {
+		fl.Flush()
+	}
+	slog.Info("restart requested from the admin panel")
+	go s.opt.Restart()
 }
 
 // degraded says whether the site is unusable, and why when it is known.
