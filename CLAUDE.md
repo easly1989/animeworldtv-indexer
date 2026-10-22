@@ -40,7 +40,7 @@ Things that span files and bite:
 - Dubbed versions are separate site entries whose slug ends in `-ita`; the release title carries `[ITA]` for those and `[SUB ITA]` otherwise. Seasons are separate entries too.
 - An empty `q` without `tvdbid` is the RSS path (`Service.latest`): the `/updated` listing parsed by `ParseUpdated` (episode number and token come from the listing; a Prowlarr indexer Test needs it non-empty). `/search?keyword=` with no keyword redirects away, so `Client.Search` needs a keyword.
 - A series path is `/play/<slug>.<id>`; the site 302s it to the first episode page. The direct file comes from `/api/episode/info?id=<token>` (`grabber`), and a HEAD on it gives `Content-Length` and `Last-Modified` (used as pubDate).
-- `/download` is a placeholder that 302s to the MP4; it is not authenticated, like mircrewrr's.
+- `/download?ep=<token>&n=<title>` 302s to a magnet that carries the episode token, so the arr hands it to the emulated qBittorrent (`qbit`), which downloads the MP4. It is not authenticated, like mircrewrr's.
 
 ## Agent skills
 
