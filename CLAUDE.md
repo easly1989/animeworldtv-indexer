@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Go service that exposes AnimeWorld (`https://www.animeworld.ac`; the `.tv`/`.so` domains redirect there) as a **Torznab indexer** for Prowlarr/Sonarr/Radarr. It began as a fork of TuxDave's Java Swing AnimeDownloader, which was removed. Planned: an emulated qBittorrent API that downloads the MP4s, TVDB mapping via MAL/AniList ids, a Byparr fallback, RSS, movies, and a status/SSE API for mircrewrr's admin panel. The sibling project `mircrewrr` (Python/Flask) runs in the same compose stack: Prowlarr 9696, mircrewrr 9697, this service 9698.
+A Go service that exposes AnimeWorld (`https://www.animeworld.ac`; the `.tv`/`.so` domains redirect there) as a **Torznab indexer** for Prowlarr/Sonarr/Radarr. It began as a fork of TuxDave's Java Swing AnimeDownloader, which was removed. Besides searches it serves RSS and movies, maps series to TVDB seasons and episodes via MAL/AniList ids, gets past Cloudflare through Byparr, emulates a qBittorrent client that downloads the MP4s, and gives mircrewrr's admin panel a status/log API and settings it can change. The sibling project `mircrewrr` (Python/Flask) runs in the same compose stack: Prowlarr 9696, mircrewrr 9697, this service 9698 (container `animeworld-indexer`).
 
 ## Build, test, run
 
@@ -25,8 +25,14 @@ Pure Go, no CGO (SQLite is `modernc.org/sqlite`). Config is environment variable
 - `torznab` — HTTP handler: `/api` (`t=caps|search|tvsearch|movie`, apikey check, Torznab XML written by hand to keep the `torznab:` prefix) and `/download?ep=<token>`. Talks to a small `Backend` interface.
 - `indexer` — the service: search → series pages → per-episode releases. Owns caching in SQLite, a shared request semaphore, and the file-size time budget (unmeasured sizes are estimated while lookups finish in the background). Depends on `Site` and `Cache` interfaces so tests use fakes.
 - `animeworld` — scraping. `parse.go` is pure (HTML/JSON in, structs out); `client.go` does the HTTP (one retry on 5xx/transport errors); `polite.go` holds the origin rate limiter (a transport wrapper, so redirect hops count) and the ban handling: a 403/429 without Cloudflare challenge markers is `ErrOriginBlocked` (an `ErrBlocked`), the solver is not called, and origin requests fail fast for 5 min doubling to 1 h. Never test against the live site: it bans IPs.
+- `mapping` — AnimeWorld series (MAL/AniList ids) to TVDB/TMDB ids, seasons and episode offsets, from the Fribb anime-lists; seasons guessed from the title when it has nothing.
+- `solver` — Cloudflare challenges through a FlareSolverr-compatible service (Byparr); cookies and user agent are reused and cached on disk.
+- `qbit` — the subset of qBittorrent's Web API v2 that Sonarr/Radarr use. A "torrent" is an episode: `torrents/add` takes the feed's magnet, `downloader` fetches the MP4.
+- `downloader` — the download queue behind `qbit`; with a store, jobs survive a restart and resume from the bytes on disk, at most `MaxDownloads` at once.
+- `status` — `GET /api/status` and `GET /api/logs` (SSE) for mircrewrr's panel, read server-side, plus `GET/PUT /api/settings` and `POST /api/restart` (exits; Docker starts it again).
+- `settings` — values changed from the panel, kept in `DATA_DIR/settings.json`; they override the environment from the next start, so a change needs a restart. An unusable file is quarantined with a date, not used.
 - `store` — SQLite key/value cache with per-read max age. Later features add their own tables.
-- `config` — env parsing.
+- `config` — env parsing; `main` lays the panel's saved settings over it at start.
 
 Things that span files and bite:
 
